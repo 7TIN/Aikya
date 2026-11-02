@@ -34,11 +34,37 @@ the same shape:
 
 The important property is **copy-on-write (COW)**. A new branch starts with zero
 copied data. Reads come from the parent until the branch writes its own version
-of a page. `written_data_bytes` from the Neon API is therefore the intended
-branch-local "how much did this branch write" signal — much more meaningful than
-`pg_database_size`, which includes inherited data. It can lag or report `0` on
-some projects, so this repo also reports `pg_stat_user_tables` write activity and
-the parent-vs-branch size delta as independent evidence.
+of a page. Three different numbers describe a branch, and mixing them up makes
+COW look broken:
+
+| Number | What it means |
+| --- | --- |
+| `pg_database_size()` | logical size of one database **including inherited pages** |
+| Neon `logical_size` | logical size of the whole branch (all databases), also including inherited pages |
+| `logical_size` delta vs parent | only the pages the branch changed or added — the branch-local growth |
+| `written_data_bytes` | data written during the current billing period; useful, but can lag or report `0` |
+| `pg_stat_user_tables` | branch-compute write counters (inserts / updates / deletes) |
+
+A 19 MB parent with a 19.9 MB branch does **not** mean 19.9 MB was copied. It
+means the branch still logically contains the 19 MB it inherited, plus roughly
+0.7 MB of its own pages. Neon bills a child branch on the **minimum of
+accumulated changes since creation and its logical data size**, so the inherited
+copy is not billed again. The report therefore prints the branch delta and an
+approximate child-storage number next to the logical sizes.
+
+Measured on this lab:
+
+```text
+main              logical 41.5 MB   pg_database_size 19.2 MB
+demo-coupons-new  logical 42.3 MB   pg_database_size 19.9 MB
+logical delta     +784.0 KB         pg_database_size delta +736.0 KB
+branch rows       72,426 inherited + 1,503 inserted
+branch writes     1,503 ins / 1,500 upd / 0 del
+```
+
+The branch inherited 72,426 rows instead of re-inserting them, and added under
+1 MB of new pages. That is COW working. `written_data_bytes` can still read
+`0 B` on this project, so treat it as a bonus signal, not proof.
 
 Use cases this repo is building toward:
 
@@ -194,7 +220,10 @@ bun run branch:report --base-url "$BASE_URL" --branch-url "$BRANCH_URL"
 ### What the report contains
 
 - Branch metadata: id, state, creation time, `written_data_bytes`, CPU seconds.
-- Storage: parent size, branch size, delta, total rows.
+- Storage: parent/branch logical size, branch-local delta, Neon `logical_size`
+  delta, approximate child-branch storage, total rows. The labels say
+  "logical, not physical branch allocation" so the inherited pages are not
+  mistaken for a full copy.
 - Compute-local write activity: inserts / updates / deletes from
   `pg_stat_user_tables` (works even when `written_data_bytes` reports 0).
 - Per-table: rows in parent → branch, size in parent → branch, deltas.
@@ -218,9 +247,15 @@ bun run branch:demo --name demo-coupons
 ✔ Branch demo-coupons is ready
 ✔ Applied 7 statements to demo-coupons
 
-Storage        19.2 MB → 19.9 MB  (+760.0 KB)
-Rows           72,426 → 73,929  (+1,503)
-Branch writes  +1,503 ins / +1,500 upd / 0 del
+Storage (logical, not physical branch allocation)
+Parent data   19.2 MB (neondb, pg_database_size)
+Branch data   19.9 MB (neondb: inherited + branch-local)
+Branch delta  +736.0 KB (new pages since branch creation)
+Neon logical  41.5 MB → 42.3 MB (+784.0 KB) (all databases)
+Child storage ~784.0 KB (billed on the branch delta, capped at logical size)
+Rows          72,426 → 73,929 (+1,503)
+Branch writes +1,503 ins / +1,500 upd / 0 del
+Neon writes   0 B (written_data_bytes: lagging/unreliable)
 
 + table coupons
 ~ table orders
@@ -229,10 +264,10 @@ Branch writes  +1,503 ins / +1,500 upd / 0 del
     + index orders_coupon_code_idx
 ```
 
-`written_data_bytes` reported `0 B` for this project even after the writes.
-That metric can lag or be unreported; the size delta and
-`pg_stat_user_tables` activity are the reliable fallback. The branch is left in
-place for inspection.
+The branch did not copy 19.9 MB. It logically contains the 19 MB it inherited
+plus ~0.7 MB of new pages. `written_data_bytes` reported `0 B` for this project
+even after the writes; the logical-size delta and `pg_stat_user_tables` activity
+are the reliable evidence. The branch is left in place for inspection.
 
 If a branch command reports `Not signed in`, the database connection can still
 work — only management API calls are blocked. Authenticate once:
@@ -491,7 +526,8 @@ agent task starts
 
 | Metric | Source | Why |
 | --- | --- | --- |
-| `written_data_bytes` | Neon API / `branch list` | branch-local storage growth (can lag / be 0) |
+| `logical_size` delta vs parent | Neon API / `branch list` | branch-local logical growth (the COW delta) |
+| `written_data_bytes` | Neon API / `branch list` | data written this billing period (can lag / be 0) |
 | `pg_stat_user_tables` writes | SQL | inserts / updates / deletes on the branch compute |
 | `pg_database_size()` | SQL | total logical size (includes inherited pages) |
 | table/index size | SQL | which tables changed |
@@ -588,7 +624,8 @@ another 500 orders to the existing branch.
 | `password authentication failed` | stale URL after claim/reset | `neon env pull` |
 | `prepared statement already exists` | pooled endpoint | keep `prepare: false` (already set) |
 | migrations hang | using pooled URL for DDL | use `DATABASE_URL_UNPOOLED` |
-| report shows huge branch, `0 B` COW writes | COW inheritance + lagging/absent metric | use the size delta and `pg_stat_user_tables` writes, not size alone |
+| report shows 19.9 MB branch, parent 19.2 MB | branch logical size includes inherited COW pages | read `Branch delta` / `Neon logical` delta, not the absolute size |
+| `0 B` Neon writes / `written_data_bytes` | lagging or unreported metric | use the logical-size delta and `pg_stat_user_tables` writes |
 
 ### Delete the lab project
 

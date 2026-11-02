@@ -119,7 +119,10 @@ async function main(): Promise<void> {
     console.log(
       report.branch.writtenDataBytes > 0
         ? dim(`Neon reports ${formatBytes(report.branch.writtenDataBytes)} of branch-local writes.`)
-        : dim("Neon reported 0 B of written_data_bytes (the metric can lag; see branch writes)."),
+        : dim(
+            "Neon reported 0 B of written_data_bytes (lagging/unreliable here); COW is proven by the " +
+              "branch delta and branch writes above.",
+          ),
     );
   }
   console.log("");

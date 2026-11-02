@@ -16,6 +16,8 @@ export interface NeonBranch {
   stateChangedAt: string;
   createdAt: string;
   updatedAt: string;
+  /** Neon's logical size for the whole branch (all databases, inherited + local). */
+  logicalSize: number;
   writtenDataBytes: number;
   cpuUsedSec: number;
   computeTimeSeconds: number;
@@ -34,6 +36,7 @@ interface RawBranch {
   state_changed_at?: string;
   created_at: string;
   updated_at: string;
+  logical_size?: number;
   written_data_bytes?: number;
   cpu_used_sec?: number;
   compute_time_seconds?: number;
@@ -53,6 +56,7 @@ function toBranch(raw: RawBranch): NeonBranch {
     stateChangedAt: raw.state_changed_at ?? "",
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
+    logicalSize: Number(raw.logical_size ?? 0),
     writtenDataBytes: Number(raw.written_data_bytes ?? 0),
     cpuUsedSec: Number(raw.cpu_used_sec ?? 0),
     computeTimeSeconds: Number(raw.compute_time_seconds ?? 0),

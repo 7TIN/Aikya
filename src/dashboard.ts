@@ -93,7 +93,7 @@ export const dashboardHtml = `<!doctype html>
   <h2>Branches</h2>
   <div class="panel">
     <table>
-      <thead><tr><th>branch</th><th>state</th><th>COW writes</th><th>CPU s</th><th>created</th><th></th></tr></thead>
+      <thead><tr><th>branch</th><th>state</th><th>logical size</th><th>Δ parent</th><th>Neon writes</th><th>created</th><th></th></tr></thead>
       <tbody id="branches"></tbody>
     </table>
   </div>
@@ -115,6 +115,11 @@ function formatBytes(bytes) {
 }
 function formatNumber(value) {
   return new Intl.NumberFormat("en-US").format(Number(value || 0));
+}
+function formatBytesDelta(bytes) {
+  if (bytes === null || bytes === undefined || Number.isNaN(bytes)) return "n/a";
+  if (bytes === 0) return "0 B";
+  return (bytes > 0 ? "+" : "-") + formatBytes(Math.abs(bytes));
 }
 function formatDate(value) {
   if (!value) return "n/a";
@@ -201,9 +206,10 @@ async function load() {
   if (branches.status === "fulfilled") {
     if (branches.value.branches.length === 0) {
       const tr = row(cell("No branches visible.", "empty"));
-      tr.firstChild.colSpan = 6;
+      tr.firstChild.colSpan = 7;
       table.appendChild(tr);
     }
+    const byId = new Map(branches.value.branches.map((branch) => [branch.id, branch]));
     for (const branch of branches.value.branches) {
       const name = document.createElement("td");
       const strong = document.createElement("strong");
@@ -228,18 +234,25 @@ async function load() {
       button.addEventListener("click", () => runReport(branch.name, info, button));
       action.appendChild(button);
 
+      const parent = branch.parentId ? byId.get(branch.parentId) : undefined;
+      const delta =
+        parent && parent.logicalSize > 0
+          ? branch.logicalSize - parent.logicalSize
+          : undefined;
+
       table.appendChild(row(
         name,
         state,
+        cell(branch.logicalSize > 0 ? formatBytes(branch.logicalSize) : "n/a", "num"),
+        cell(formatBytesDelta(delta), "num"),
         cell(formatBytes(branch.writtenDataBytes), "num"),
-        cell(String(branch.cpuUsedSec), "num"),
         cell(formatDate(branch.createdAt)),
         action,
       ));
     }
   } else {
     const tr = row(cell(branches.reason.message, "empty error"));
-    tr.firstChild.colSpan = 6;
+    tr.firstChild.colSpan = 7;
     table.appendChild(tr);
   }
 }
@@ -254,13 +267,28 @@ async function runReport(name, output, button) {
     lines.push("parent:  " + report.parent.name);
     lines.push("mode:    " + report.mode);
     lines.push("created: " + formatDate(report.branch.createdAt));
+    if (report.branch.name === report.parent.name) {
+      lines.push("note:    branch and parent are the same; writes are the baseline, not a branch delta");
+    }
     lines.push("");
-    lines.push("storage");
-    lines.push("  parent: " + formatBytes(report.base.sizeBytes));
-    lines.push("  branch: " + formatBytes(report.compare.sizeBytes));
-    lines.push("  delta:  " + (report.sizeDeltaBytes >= 0 ? "+" : "") + formatBytes(report.sizeDeltaBytes));
+    lines.push("storage (logical, not physical branch allocation)");
+    lines.push("  parent data:   " + formatBytes(report.base.sizeBytes) + "  (neondb, pg_database_size)");
+    lines.push("  branch data:   " + formatBytes(report.compare.sizeBytes) + "  (neondb: inherited + branch-local)");
+    lines.push("  branch delta:  " + formatBytesDelta(report.sizeDeltaBytes) + "  (new pages since branch creation)");
+    if (typeof report.parent.logicalSizeBytes === "number" &&
+        typeof report.branch.logicalSizeBytes === "number" &&
+        typeof report.logicalSizeDeltaBytes === "number") {
+      lines.push("  neon logical:  " + formatBytes(report.parent.logicalSizeBytes) + " -> " +
+        formatBytes(report.branch.logicalSizeBytes) + " (" + formatBytesDelta(report.logicalSizeDeltaBytes) +
+        ")  (all databases)");
+      if (typeof report.estimatedBranchStorageBytes === "number") {
+        lines.push("  child storage: ~" + formatBytes(report.estimatedBranchStorageBytes) +
+          "  (billed on branch delta, capped at logical size)");
+      }
+    }
     if (typeof report.branch.writtenDataBytes === "number") {
-      lines.push("  cow writes: " + formatBytes(report.branch.writtenDataBytes));
+      lines.push("  neon writes:   " + formatBytes(report.branch.writtenDataBytes) +
+        (report.branch.writtenDataBytes === 0 ? "  (written_data_bytes; lagging/unreliable)" : ""));
     }
     lines.push("  branch writes: " + report.branchWrites.inserts + " ins / " +
       report.branchWrites.updates + " upd / " + report.branchWrites.deletes + " del");

@@ -2,6 +2,7 @@ import {
   bold,
   dim,
   formatBytes,
+  formatBytesDelta,
   formatDate,
   paint,
   renderTable,
@@ -38,26 +39,38 @@ async function main(): Promise<void> {
         return;
       }
 
+      const byId = new Map(branches.map((branch) => [branch.id, branch]));
+
       console.log("");
       console.log(bold(paint("cyan", "Neon branches")));
-      console.log("─".repeat(96));
+      console.log("─".repeat(112));
       console.log(
         renderTable(
-          ["name", "state", "default", "COW writes", "CPU s", "created"],
-          branches.map((branch) => [
-            `${branch.name}${branch.default ? " *" : ""}`,
-            branch.currentState,
-            branch.default ? "yes" : "",
-            formatBytes(branch.writtenDataBytes),
-            branch.cpuUsedSec,
-            formatDate(branch.createdAt),
-          ]),
+          ["name", "state", "default", "logical size", "Δ parent", "Neon writes", "created"],
+          branches.map((branch) => {
+            const parent = branch.parentId ? byId.get(branch.parentId) : undefined;
+            const delta =
+              parent && parent.logicalSize > 0
+                ? branch.logicalSize - parent.logicalSize
+                : undefined;
+            return [
+              `${branch.name}${branch.default ? " *" : ""}`,
+              branch.currentState,
+              branch.default ? "yes" : "",
+              branch.logicalSize > 0 ? formatBytes(branch.logicalSize) : "n/a",
+              delta === undefined ? "—" : formatBytesDelta(delta),
+              formatBytes(branch.writtenDataBytes),
+              formatDate(branch.createdAt),
+            ];
+          }),
         ),
       );
       console.log(
         dim(
-          "\nCOW writes = Neon written_data_bytes for the branch. 0 B can mean the metric has not flushed; " +
-            "use `bun run branch:report <branch>` for the size delta and write activity.",
+          "\nlogical size = Neon branch size including inherited pages (all databases).\n" +
+            "Δ parent      = branch-local growth since creation, not the full database copy.\n" +
+            "Neon writes   = written_data_bytes for this billing period; 0 B can mean lag/unreported.\n" +
+            "Use `bun run branch:report <branch>` for the size delta and write activity.",
         ),
       );
       console.log("");
@@ -154,7 +167,7 @@ async function main(): Promise<void> {
         [
           "Usage: bun run branch:<command> [args]",
           "",
-          "  list                                  List branches + COW writes",
+          "  list                                  List branches, logical size, delta vs parent",
           "  create --name <branch>                Create a branch",
           "  delete <branch> --yes                 Delete a branch",
           "  report <branch> [--parent main]       Storage + schema comparison",

@@ -60,7 +60,7 @@ can keep working independently.
 | `bun run db:stats` | Database size, rows, writes (`--branch`, `--url`, `--json`) |
 | `bun run db:sql <file>` | Run a SQL file on `--branch <name>` or `--url <url>` |
 | `bun run db:studio` | Open Drizzle Studio |
-| `bun run branch:list` | List branches with COW writes (`--json`) |
+| `bun run branch:list` | List branches, logical size, delta vs parent (`--json`) |
 | `bun run branch:create --name <branch>` | Create a branch from `main` |
 | `bun run branch:report <branch>` | Storage + schema diff vs parent (`--json`, `--neon-diff`) |
 | `bun run branch:diff <base> <compare>` | Neon's own schema diff |
@@ -81,9 +81,15 @@ can keep working independently.
 4. Compares the branch with its parent:
 
 ```
-Storage        19.2 MB → 19.9 MB  (+760.0 KB)
-Rows           72,426 → 73,929  (+1,503)
-Branch writes  +1,503 ins / +1,500 upd / 0 del
+Storage (logical, not physical branch allocation)
+Parent data   19.2 MB (neondb, pg_database_size)
+Branch data   19.9 MB (neondb: inherited + branch-local)
+Branch delta  +736.0 KB (new pages since branch creation)
+Neon logical  41.5 MB → 42.3 MB (+784.0 KB) (all databases)
+Child storage ~784.0 KB (billed on the branch delta, capped at logical size)
+Rows          72,426 → 73,929 (+1,503)
+Branch writes +1,503 ins / +1,500 upd / 0 del
+Neon writes   0 B (written_data_bytes: lagging/unreliable)
 
 Schema changes
 + table coupons
@@ -93,9 +99,12 @@ Schema changes
     + index orders_coupon_code_idx
 ```
 
-`written_data_bytes` is shown too, but it can lag or report `0` on some
-projects; the size delta and `pg_stat_user_tables` writes are the reliable
-signals.
+**The 19.9 MB is not a copy.** A branch logically contains everything it
+inherited (19.2 MB) plus its own new pages (~0.7 MB). The `Branch delta` and
+`Neon logical` delta are the branch-local growth; that is what Neon bills for a
+child branch, capped at the logical size. `written_data_bytes` is shown too, but
+it can lag or report `0` on some projects; the logical-size delta and
+`pg_stat_user_tables` writes are the reliable signals.
 
 Main is never modified. Delete the branch when done:
 
@@ -134,7 +143,7 @@ always against its parent.
 | `GET /api/health` | DB connectivity, database name, latency |
 | `GET /api/stats` | Size + row counts per table |
 | `GET /api/customers?limit=20&offset=0` | Paginated customers |
-| `GET /api/branches` | Neon branches + COW writes |
+| `GET /api/branches` | Neon branches + logical size + writes |
 | `GET /api/branches/report?name=<branch>` | Storage + schema report |
 | `POST /api/echo` | Echo request body |
 
@@ -167,8 +176,10 @@ docs/               Phase plan and runbook
 
 - Keep `prepare: false` on the client: Neon's pooled endpoint is PgBouncer.
 - Use `DATABASE_URL_UNPOOLED` for migrations and bulk loads.
-- `pg_database_size()` includes inherited COW pages; pair it with the parent
-  delta, `written_data_bytes`, and `pg_stat_user_tables` write activity.
+- `pg_database_size()` and Neon `logical_size` include inherited COW pages. The
+  branch's own growth is the parent→branch delta, which is what Neon bills for a
+  child branch (capped at logical size). Pair that with `pg_stat_user_tables`
+  write activity; `written_data_bytes` can lag or report `0`.
 - The lab started as a Claimable Neon project and is now claimed. Claiming
   rotates the connection string and drops the CLI's pre-claim credential; run
   `neon login` (or set `NEON_API_KEY`) and `neon env pull` if needed. The

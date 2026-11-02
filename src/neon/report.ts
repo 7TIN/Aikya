@@ -42,6 +42,8 @@ export interface BranchReport {
     id?: string;
     state?: string;
     createdAt?: string;
+    /** Neon logical size (all databases, inherited + branch-local). */
+    logicalSizeBytes?: number;
     writtenDataBytes?: number;
     cpuUsedSec?: number;
   };
@@ -50,10 +52,20 @@ export interface BranchReport {
     id?: string;
     state?: string;
     createdAt?: string;
+    /** Neon logical size (all databases, inherited + branch-local). */
+    logicalSizeBytes?: number;
   };
   base: DatabaseStats;
   compare: DatabaseStats;
   sizeDeltaBytes: number;
+  /** Branch logical size minus parent logical size, from the Neon API. */
+  logicalSizeDeltaBytes?: number;
+  /**
+   * Best-effort branch-local storage: the logical delta, capped at the branch's
+   * logical size. Neon bills child branches on accumulated changes (capped at
+   * logical size), not on the full inherited database.
+   */
+  estimatedBranchStorageBytes?: number;
   rowDelta: number;
   branchWrites: WriteActivity;
   tables: TableComparison[];
@@ -188,6 +200,29 @@ export async function buildBranchReport(
         ? await neonSchemaDiff(parentName, branchName)
         : null;
 
+    const branchLogicalSize = context.branchMeta?.logicalSize;
+    const parentLogicalSize = context.parentMeta?.logicalSize;
+    let logicalSizeDelta: number | undefined;
+    let estimatedBranchStorage: number | undefined;
+
+    if (
+      typeof branchLogicalSize === "number" &&
+      branchLogicalSize > 0 &&
+      typeof parentLogicalSize === "number" &&
+      parentLogicalSize > 0
+    ) {
+      logicalSizeDelta = branchLogicalSize - parentLogicalSize;
+
+      // Only a child branch is billed on a delta. Root branches pay for the
+      // full logical size, so do not print a child-storage estimate for them.
+      if (context.branchMeta?.parentId) {
+        estimatedBranchStorage = Math.max(
+          0,
+          Math.min(branchLogicalSize, Math.abs(logicalSizeDelta)),
+        );
+      }
+    }
+
     return {
       mode: context.mode,
       branch: {
@@ -195,6 +230,7 @@ export async function buildBranchReport(
         id: context.branchMeta?.id,
         state: context.branchMeta?.currentState,
         createdAt: context.branchMeta?.createdAt,
+        logicalSizeBytes: branchLogicalSize,
         writtenDataBytes: context.branchMeta?.writtenDataBytes,
         cpuUsedSec: context.branchMeta?.cpuUsedSec,
       },
@@ -203,10 +239,13 @@ export async function buildBranchReport(
         id: context.parentMeta?.id,
         state: context.parentMeta?.currentState,
         createdAt: context.parentMeta?.createdAt,
+        logicalSizeBytes: parentLogicalSize,
       },
       base: baseStats,
       compare: compareStats,
       sizeDeltaBytes: compareStats.sizeBytes - baseStats.sizeBytes,
+      logicalSizeDeltaBytes: logicalSizeDelta,
+      estimatedBranchStorageBytes: estimatedBranchStorage,
       rowDelta: compareStats.totalRows - baseStats.totalRows,
       branchWrites: compareStats.writes,
       tables: compareTables(baseStats, compareStats),
@@ -231,22 +270,45 @@ export function printBranchReport(report: BranchReport): void {
   console.log(`Captured    ${formatDate(report.capturedAt)}`);
   console.log(`Mode        ${report.mode === "neon" ? "Neon branch (copy-on-write)" : "direct connection pair"}`);
 
-  if (typeof report.branch.writtenDataBytes === "number") {
-    const note =
-      report.branch.writtenDataBytes === 0
-        ? "(Neon metric reported 0 B; it can lag — see branch writes)"
-        : "(Neon written_data_bytes)";
+  if (report.branch.name === report.parent.name) {
     console.log(
-      `COW writes  ${bold(formatBytes(report.branch.writtenDataBytes))} ${dim(note)}`,
+      dim(
+        "Note        branch and parent are the same; writes below are the baseline, not a branch delta.",
+      ),
     );
   }
 
   console.log("");
-  console.log(bold("Storage"));
+  console.log(bold("Storage (logical, not physical branch allocation)"));
   console.log(line);
-  console.log(`Parent size   ${formatBytes(report.base.sizeBytes)}`);
-  console.log(`Branch size   ${formatBytes(report.compare.sizeBytes)}`);
-  console.log(`Delta         ${paintDelta(report.sizeDeltaBytes)}`);
+  console.log(
+    `Parent data   ${formatBytes(report.base.sizeBytes)} ${dim("(neondb, pg_database_size)")}`,
+  );
+  console.log(
+    `Branch data   ${formatBytes(report.compare.sizeBytes)} ${dim("(neondb: inherited + branch-local)")}`,
+  );
+  console.log(
+    `Branch delta  ${paintDelta(report.sizeDeltaBytes)} ${dim("(new pages since branch creation)")}`,
+  );
+
+  if (
+    typeof report.parent.logicalSizeBytes === "number" &&
+    typeof report.branch.logicalSizeBytes === "number" &&
+    typeof report.logicalSizeDeltaBytes === "number"
+  ) {
+    console.log(
+      `Neon logical  ${formatBytes(report.parent.logicalSizeBytes)} → ` +
+        `${formatBytes(report.branch.logicalSizeBytes)} ` +
+        `(${paintDelta(report.logicalSizeDeltaBytes)}) ${dim("(all databases)")}`,
+    );
+    if (typeof report.estimatedBranchStorageBytes === "number") {
+      console.log(
+        `Child storage ~${formatBytes(report.estimatedBranchStorageBytes)} ` +
+          dim("(billed on the branch delta, capped at logical size)"),
+      );
+    }
+  }
+
   console.log(
     `Rows          ${formatNumber(report.base.totalRows)} → ${formatNumber(report.compare.totalRows)} ` +
       `(${paintDeltaText(formatSigned(report.rowDelta), report.rowDelta)})`,
@@ -257,6 +319,16 @@ export function printBranchReport(report: BranchReport): void {
       `${formatNumber(report.branchWrites.deletes)} del ` +
       dim("(compute-local pg_stat_user_tables)"),
   );
+
+  if (typeof report.branch.writtenDataBytes === "number") {
+    const note =
+      report.branch.writtenDataBytes === 0
+        ? "(written_data_bytes: reported 0 B; lagging/unreliable — see branch writes)"
+        : "(written_data_bytes)";
+    console.log(
+      `Neon writes   ${bold(formatBytes(report.branch.writtenDataBytes))} ${dim(note)}`,
+    );
+  }
 
   console.log("");
   console.log(bold("Tables"));
