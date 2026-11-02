@@ -8,12 +8,32 @@
     "dev": "bun --watch src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun --minify",
     "start": "bun run dist/index.js",
-    "typecheck": "bun check"
+    "typecheck": "bun check",
+    "test": "bun test",
+    "db:generate": "bunx --bun drizzle-kit generate",
+    "db:migrate": "bun run src/db/migrate.ts",
+    "db:seed": "bun run src/db/seed.ts",
+    "db:reset": "bun run src/db/reset.ts",
+    "db:stats": "bun run src/cli/stats.ts",
+    "db:sql": "bun run src/cli/sql.ts",
+    "db:studio": "bunx --bun drizzle-kit studio",
+    "branch:list": "bun run src/cli/branch.ts list",
+    "branch:create": "bun run src/cli/branch.ts create",
+    "branch:delete": "bun run src/cli/branch.ts delete",
+    "branch:report": "bun run src/cli/branch.ts report",
+    "branch:diff": "bun run src/cli/branch.ts diff",
+    "branch:demo": "bun run src/cli/demo.ts",
+    "demo": "bun run src/cli/demo.ts"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "drizzle-kit": "^0.31.11"
   },
   "peerDependencies": {
     "typescript": "^7"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.4",
+    "postgres": "^4.0.0"
   }
 }
