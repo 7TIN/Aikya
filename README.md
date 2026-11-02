@@ -103,6 +103,29 @@ Main is never modified. Delete the branch when done:
 bun run branch:delete demo-coupons --yes
 ```
 
+### Re-running the experiment
+
+`branch:demo` refuses to overwrite an existing branch. For a clean repeat:
+
+```bash
+# delete the previous branch, then recreate it
+bun run branch:delete demo-coupons --yes
+bun run branch:demo --name demo-coupons
+
+# or keep the old branch and use a new name
+bun run branch:demo --name demo-coupons-2
+
+# or create, report, and delete in one command
+bun run branch:demo --name demo-coupons-tmp --cleanup
+```
+
+`--reuse` applies the demo data again (adding another 500 orders), so
+delete-and-recreate is the cleanest way to repeat the test.
+
+The dashboard's top cards and table list use `DATABASE_URL` (main). Branch
+cards and **Run report** open separate connections, so the branch comparison is
+always against its parent.
+
 ## API
 
 | Route | Description |

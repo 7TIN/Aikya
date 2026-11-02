@@ -7,6 +7,7 @@ import {
   branchConnectionString,
   createBranch,
   deleteBranch,
+  listBranches,
 } from "../neon/branches.ts";
 import { parentBranchName } from "../neon/cli.ts";
 import { buildBranchReport, printBranchReport } from "../neon/report.ts";
@@ -46,6 +47,22 @@ async function main(): Promise<void> {
     throw new Error(
       "The baseline database has no data (or no schema). Run `bun run db:reset` first, " +
         "then re-run the demo.",
+    );
+  }
+
+  const existing = await listBranches();
+  const exists = existing.some((branch) => branch.name === branchName);
+
+  if (exists && !reuse) {
+    throw new Error(
+      `Branch "${branchName}" already exists.\n\n` +
+        `Re-run cleanly:\n` +
+        `  bun run branch:delete ${branchName} --yes\n` +
+        `  bun run branch:demo --name ${branchName}\n\n` +
+        `Or use a fresh name:\n` +
+        `  bun run branch:demo --name ${branchName}-2\n\n` +
+        `Or reuse it (this applies the data SQL again):\n` +
+        `  bun run branch:demo --reuse --name ${branchName}`,
     );
   }
 

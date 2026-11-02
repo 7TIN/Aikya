@@ -563,6 +563,19 @@ bun run branch:demo --name demo-coupons
 bun run branch:delete demo-coupons --yes
 ```
 
+To repeat cleanly, delete first or use a new name:
+
+```bash
+bun run branch:delete demo-coupons --yes
+bun run branch:demo --name demo-coupons
+
+# or one-shot (create → report → delete)
+bun run branch:demo --name demo-coupons-tmp --cleanup
+```
+
+`--reuse` is not a clean reset: it applies the demo data SQL again, adding
+another 500 orders to the existing branch.
+
 ### Troubleshooting
 
 | Symptom | Cause | Fix |
