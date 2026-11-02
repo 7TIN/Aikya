@@ -100,7 +100,9 @@ async function main(): Promise<void> {
   console.log(dim(`  bun run branch:delete ${branch.name} --yes`));
   if (typeof report.branch.writtenDataBytes === "number") {
     console.log(
-      dim(`Neon reports ${formatBytes(report.branch.writtenDataBytes)} of branch-local writes.`),
+      report.branch.writtenDataBytes > 0
+        ? dim(`Neon reports ${formatBytes(report.branch.writtenDataBytes)} of branch-local writes.`)
+        : dim("Neon reported 0 B of written_data_bytes (the metric can lag; see branch writes)."),
     );
   }
   console.log("");

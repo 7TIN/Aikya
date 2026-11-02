@@ -20,14 +20,44 @@ export function neonProjectId(): string {
   return projectId;
 }
 
-function claimHint(stderr: string): string {
-  if (!stderr.includes("before claim")) return "";
-  return (
-    "\n\nThis is an unclaimed Claimable Neon project. Branch creation is a management\n" +
-    "operation that unlocks after the project is claimed. Run `neon claim accept`\n" +
-    "(opens a browser, needs a Neon account), then retry. You can also point\n" +
-    "NEON_PROJECT_ID at an existing claimed project.\n"
-  );
+function troubleshootingHint(stderr: string): string {
+  if (stderr.includes("before claim")) {
+    return (
+      "\n\nThis is an unclaimed Claimable Neon project. Branch creation is a management\n" +
+      "operation that unlocks after the project is claimed. Run `neon claim accept`\n" +
+      "(opens a browser, needs a Neon account), then retry. You can also point\n" +
+      "NEON_PROJECT_ID at an existing claimed project.\n"
+    );
+  }
+
+  if (
+    stderr.includes("being claimed") ||
+    stderr.includes("claim-status polling") ||
+    stderr.includes("claim_in_progress")
+  ) {
+    return (
+      "\n\nThis project's claim transfer is still in progress, so only claim status\n" +
+      "is available. Run `neon claim status`. If it reports `reconciled: true`,\n" +
+      "authenticate the Neon CLI (`neon login` or `NEON_API_KEY`), refresh env with\n" +
+      "`neon env pull`, then retry.\n"
+    );
+  }
+
+  if (
+    stderr.includes("Not signed in") ||
+    stderr.includes("no stored credential") ||
+    stderr.includes("authentication")
+  ) {
+    return (
+      "\n\nThe Neon CLI is not authenticated. The database connection can still work,\n" +
+      "but branch management uses the Neon API. Either:\n" +
+      "  • run `neon login` (opens a browser), or\n" +
+      "  • create an API key (Neon console → Account settings → API keys) and add\n" +
+      "    NEON_API_KEY=napi_... to .env.local, then retry.\n"
+    );
+  }
+
+  return "";
 }
 
 /** Run the Neon CLI and return stdout. Throws NeonCliError on failure. */
@@ -46,7 +76,7 @@ export async function runNeon(args: string[]): Promise<string> {
   if (exitCode !== 0) {
     const detail = stderr.trim() || stdout.trim() || `exit code ${exitCode}`;
     throw new NeonCliError(
-      `neon ${args.join(" ")} failed: ${detail}${claimHint(detail)}`,
+      `neon ${args.join(" ")} failed: ${detail}${troubleshootingHint(detail)}`,
       args,
       detail,
     );

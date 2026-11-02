@@ -34,9 +34,11 @@ the same shape:
 
 The important property is **copy-on-write (COW)**. A new branch starts with zero
 copied data. Reads come from the parent until the branch writes its own version
-of a page. `written_data_bytes` from the Neon API is therefore the best
-branch-local "how much did this branch cost in writes" signal — much more
-meaningful than `pg_database_size`, which includes inherited data.
+of a page. `written_data_bytes` from the Neon API is therefore the intended
+branch-local "how much did this branch write" signal — much more meaningful than
+`pg_database_size`, which includes inherited data. It can lag or report `0` on
+some projects, so this repo also reports `pg_stat_user_tables` write activity and
+the parent-vs-branch size delta as independent evidence.
 
 Use cases this repo is building toward:
 
@@ -108,8 +110,8 @@ Rules that keep this safe:
 ```
 
 Why the CLI instead of only the SDK: the CLI works with a signed-in developer
-machine, a `NEON_API_KEY` in CI, and the temporary Claimable project used for
-this lab. The wrapper in `src/neon/cli.ts` is the seam to replace with
+machine, a `NEON_API_KEY` in CI, and the Claimable project used to bootstrap
+this lab (now claimed). The wrapper in `src/neon/cli.ts` is the seam to replace with
 `@neon/sdk` when the pipeline needs typed API access.
 
 ---
@@ -118,7 +120,7 @@ this lab. The wrapper in `src/neon/cli.ts` is the seam to replace with
 
 | Phase | Outcome | Status |
 | --- | --- | --- |
-| 1 | Baseline DB, seed data, manual branch, storage + schema report | Built; branch creation waits on a one-time claim |
+| 1 | Baseline DB, seed data, manual branch, storage + schema report | Built; `demo-coupons` branch created and reported |
 | 2 | PR previews and ephemeral CI branches, automatic cleanup | Planned |
 | 3 | Staging/testing branches, refresh and promotion workflow | Planned |
 | 4 | Per-agent sandboxes with TTL, quotas, and guardrails | Planned |
@@ -193,6 +195,8 @@ bun run branch:report --base-url "$BASE_URL" --branch-url "$BRANCH_URL"
 
 - Branch metadata: id, state, creation time, `written_data_bytes`, CPU seconds.
 - Storage: parent size, branch size, delta, total rows.
+- Compute-local write activity: inserts / updates / deletes from
+  `pg_stat_user_tables` (works even when `written_data_bytes` reports 0).
 - Per-table: rows in parent → branch, size in parent → branch, deltas.
 - Schema diff: tables, columns (added/removed, plus type/nullability/default
   when changed), indexes, enums.
@@ -201,35 +205,62 @@ bun run branch:report --base-url "$BASE_URL" --branch-url "$BRANCH_URL"
 
 ### Current lab database
 
-A temporary **Claimable Neon** project was created for this phase. It holds the
-seeded baseline and lives in the `aws-ap-southeast-1` region. The project id and
-connection strings are in `.env.local` (git-ignored). Claimable projects expire
-after **72 hours**; check with:
+The lab started as a temporary **Claimable Neon** project in
+`aws-ap-southeast-1` and has since been **claimed** (`reconciled: true`). It now
+lives in the Neon account used to claim it. Project/branch ids and the rotated
+connection strings are in `.env.local` (git-ignored) and `.neon`.
 
-```bash
-neon claim list
-neon claim status
+Phase 1 has actually run:
+
+```text
+bun run branch:demo --name demo-coupons
+
+✔ Branch demo-coupons is ready
+✔ Applied 7 statements to demo-coupons
+
+Storage        19.2 MB → 19.9 MB  (+760.0 KB)
+Rows           72,426 → 73,929  (+1,503)
+Branch writes  +1,503 ins / +1,500 upd / 0 del
+
++ table coupons
+~ table orders
+    + column coupon_code
+    + column discount_cents
+    + index orders_coupon_code_idx
 ```
 
-**One-time blocker:** Neon does not allow branch creation on an unclaimed
-project ("This Neon Management API operation is not available before claim").
-Baseline seeding, statistics, the server, and the reporting engine all work
-today; `branch:create` / `branch:demo` unlock after the project is claimed.
+`written_data_bytes` reported `0 B` for this project even after the writes.
+That metric can lag or be unreported; the size delta and
+`pg_stat_user_tables` activity are the reliable fallback. The branch is left in
+place for inspection.
 
-To claim it (requires a Neon account), run:
-
-```bash
-neon claim accept
-```
-
-After claiming, the pre-claim `DATABASE_URL` is rotated. Refresh local env, then
-run the demo:
+If a branch command reports `Not signed in`, the database connection can still
+work — only management API calls are blocked. Authenticate once:
 
 ```bash
-neon link --project-id <project-id>   # or neon link and pick the project
-neon env pull
-bun run branch:demo
+neon login                            # browser
+# or: add NEON_API_KEY=napi_... to .env.local
 ```
+
+`.neon` already holds the project and branch ids and every command passes
+`--project-id`, so `neon link` is optional. Run `neon env pull` if you need to
+refresh a rotated connection string.
+
+### Bootstrapping a Claimable project (reference)
+
+For future throwaway labs:
+
+```bash
+neon claim create --region-id aws-ap-southeast-1 --env-pull
+neon claim accept                     # opens a browser; needs a Neon account
+neon claim status                     # wait for reconciled: true
+neon login                            # or set NEON_API_KEY
+neon env pull                         # claim rotates DATABASE_URL
+```
+
+Branch creation is blocked while the project is unclaimed or mid-claim
+("not available before claim", "This project is being claimed"). Both are
+expected; wait for `reconciled: true`, then authenticate.
 
 To use your own Neon project instead:
 
@@ -245,7 +276,8 @@ To use your own Neon project instead:
 - [x] Deterministic seed verified (72,426 rows, ~19.2 MB).
 - [x] Size/row/schema reporting verified against a real second database.
 - [x] Bun API + dashboard running against Neon.
-- [ ] `branch:demo` executed against a claimed project (needs the claim step).
+- [x] `branch:demo` executed against a claimed project.
+- [x] Branch report includes storage, rows, schema diff, and write activity.
 - [ ] Branch deleted through the CLI and confirmed gone from `branch:list`.
 
 ---
@@ -459,7 +491,8 @@ agent task starts
 
 | Metric | Source | Why |
 | --- | --- | --- |
-| `written_data_bytes` | Neon API / `branch list` | branch-local storage growth |
+| `written_data_bytes` | Neon API / `branch list` | branch-local storage growth (can lag / be 0) |
+| `pg_stat_user_tables` writes | SQL | inserts / updates / deletes on the branch compute |
 | `pg_database_size()` | SQL | total logical size (includes inherited pages) |
 | table/index size | SQL | which tables changed |
 | exact rows | SQL | data divergence |
@@ -468,8 +501,10 @@ agent task starts
 | branch age | Neon API | retention / stale branch detection |
 
 `pg_database_size` alone is misleading for a COW branch: a fresh branch can look
-as large as its parent while costing almost nothing. Always pair it with
-`written_data_bytes` and the parent delta.
+as large as its parent while costing almost nothing. Pair it with the parent
+delta and `pg_stat_user_tables` write activity. Treat `written_data_bytes` as a
+bonus signal: some projects report `0` until metrics flush, or do not report it
+at all.
 
 ### Retention policy (proposal)
 
@@ -508,6 +543,8 @@ bun run dev
 
 ```bash
 bun run db:stats
+bun run db:stats --branch demo-coupons
+bun run db:stats --url "$SOME_CONNECTION_STRING" --json
 ```
 
 ### Create a branch and inspect it
@@ -533,16 +570,18 @@ bun run branch:delete demo-coupons --yes
 | `DATABASE_URL is not set` | `.env.local` missing | copy `.env.example`, fill values |
 | `NEON_PROJECT_ID is not set` | branch command without a project | add it to `.env.local` |
 | `not available before claim` | Claimable project not claimed | `neon claim accept`, or use a claimed project |
+| `This project is being claimed` | claim transfer started but not finished | `neon claim status`; if `reconciled: true`, authenticate the CLI and run `neon env pull` |
+| `Not signed in` / `no stored credential` | CLI has no account credential | `neon login` or add `NEON_API_KEY` to `.env.local` |
 | `password authentication failed` | stale URL after claim/reset | `neon env pull` |
 | `prepared statement already exists` | pooled endpoint | keep `prepare: false` (already set) |
 | migrations hang | using pooled URL for DDL | use `DATABASE_URL_UNPOOLED` |
-| report shows huge branch, low COW writes | COW inheritance | compare `written_data_bytes`, not size alone |
+| report shows huge branch, `0 B` COW writes | COW inheritance + lagging/absent metric | use the size delta and `pg_stat_user_tables` writes, not size alone |
 
-### Delete the temporary lab project
+### Delete the lab project
 
-```bash
-neon claim delete --yes
-```
+The project is claimed now, so it is a normal Neon project. Delete it in the
+Neon console (Project settings → Delete project). That removes `main`, the
+`demo-coupons` branch, and every other branch in the project.
 
 Only do this when you no longer need the baseline data.
 

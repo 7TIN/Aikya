@@ -10,12 +10,20 @@ export interface TableStats {
   indexBytes: number;
 }
 
+export interface WriteActivity {
+  inserts: number;
+  updates: number;
+  deletes: number;
+  hotUpdates: number;
+}
+
 export interface DatabaseStats {
   database: string;
   serverVersion: string;
   sizeBytes: number;
   tables: TableStats[];
   totalRows: number;
+  writes: WriteActivity;
   capturedAt: string;
 }
 
@@ -31,6 +39,13 @@ interface TableSizeRow {
   total: string;
   table_size: string;
   index_size: string;
+}
+
+interface WriteActivityRow {
+  inserts: string;
+  updates: string;
+  deletes: string;
+  hot_updates: string;
 }
 
 /**
@@ -63,6 +78,15 @@ export async function collectDatabaseStats(
       order by pg_total_relation_size(c.oid) desc`,
   )) as unknown as TableSizeRow[];
 
+  const [writeRow] = (await client.unsafe(
+    `select coalesce(sum(n_tup_ins), 0)::text as inserts,
+            coalesce(sum(n_tup_upd), 0)::text as updates,
+            coalesce(sum(n_tup_del), 0)::text as deletes,
+            coalesce(sum(n_tup_hot_upd), 0)::text as hot_updates
+       from pg_stat_user_tables
+      where schemaname = 'public'`,
+  )) as unknown as WriteActivityRow[];
+
   const tables: TableStats[] = [];
   for (const row of tableRows) {
     const relation = quoteRelation(row.schema, row.table);
@@ -86,6 +110,12 @@ export async function collectDatabaseStats(
     sizeBytes: Number(info.size),
     tables,
     totalRows: tables.reduce((sum, table) => sum + table.rows, 0),
+    writes: {
+      inserts: Number(writeRow?.inserts ?? 0),
+      updates: Number(writeRow?.updates ?? 0),
+      deletes: Number(writeRow?.deletes ?? 0),
+      hotUpdates: Number(writeRow?.hot_updates ?? 0),
+    },
     capturedAt: new Date().toISOString(),
   };
 }

@@ -54,7 +54,12 @@ async function main(): Promise<void> {
           ]),
         ),
       );
-      console.log(dim("\nCOW writes = data written by the branch itself (Neon written_data_bytes)."));
+      console.log(
+        dim(
+          "\nCOW writes = Neon written_data_bytes for the branch. 0 B can mean the metric has not flushed; " +
+            "use `bun run branch:report <branch>` for the size delta and write activity.",
+        ),
+      );
       console.log("");
       return;
     }

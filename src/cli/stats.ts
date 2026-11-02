@@ -1,5 +1,6 @@
 import { createDatabase } from "../db/client.ts";
 import { collectDatabaseStats } from "../db/stats.ts";
+import { flagBool, flagString, parseArgs } from "../lib/args.ts";
 import {
   bold,
   formatBytes,
@@ -7,12 +8,20 @@ import {
   paint,
   renderTable,
 } from "../lib/format.ts";
+import { branchConnectionString } from "../neon/branches.ts";
 
-const json = Bun.argv.includes("--json");
+const { flags } = parseArgs(Bun.argv.slice(2));
+const json = flagBool(flags, "json");
+const branch = flagString(flags, "branch");
+const explicitUrl = flagString(flags, "url");
 
-const { client } = createDatabase(
-  process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL,
-);
+const url =
+  explicitUrl ??
+  (branch
+    ? await branchConnectionString(branch)
+    : process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL);
+
+const { client } = createDatabase(url);
 
 try {
   const stats = await collectDatabaseStats(client);
@@ -27,6 +36,12 @@ try {
     console.log(`Server     ${stats.serverVersion}`);
     console.log(`Size       ${bold(formatBytes(stats.sizeBytes))}`);
     console.log(`Rows       ${formatNumber(stats.totalRows)}`);
+    console.log(
+      `Writes     +${formatNumber(stats.writes.inserts)} ins / ` +
+        `+${formatNumber(stats.writes.updates)} upd / ` +
+        `${formatNumber(stats.writes.deletes)} del ` +
+        "(compute-local pg_stat_user_tables)",
+    );
     console.log("");
     console.log(
       renderTable(

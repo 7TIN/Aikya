@@ -262,6 +262,8 @@ async function runReport(name, output, button) {
     if (typeof report.branch.writtenDataBytes === "number") {
       lines.push("  cow writes: " + formatBytes(report.branch.writtenDataBytes));
     }
+    lines.push("  branch writes: " + report.branchWrites.inserts + " ins / " +
+      report.branchWrites.updates + " upd / " + report.branchWrites.deletes + " del");
     lines.push("");
     lines.push("rows: " + formatNumber(report.base.totalRows) + " -> " + formatNumber(report.compare.totalRows));
     lines.push("");

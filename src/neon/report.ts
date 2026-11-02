@@ -4,6 +4,7 @@ import { collectSchemaSnapshot } from "../db/schema-snapshot.ts";
 import {
   collectDatabaseStats,
   type DatabaseStats,
+  type WriteActivity,
 } from "../db/stats.ts";
 import {
   bold,
@@ -54,6 +55,7 @@ export interface BranchReport {
   compare: DatabaseStats;
   sizeDeltaBytes: number;
   rowDelta: number;
+  branchWrites: WriteActivity;
   tables: TableComparison[];
   schemaDiff: SchemaDiff;
   neonSchemaDiff: string | null;
@@ -206,6 +208,7 @@ export async function buildBranchReport(
       compare: compareStats,
       sizeDeltaBytes: compareStats.sizeBytes - baseStats.sizeBytes,
       rowDelta: compareStats.totalRows - baseStats.totalRows,
+      branchWrites: compareStats.writes,
       tables: compareTables(baseStats, compareStats),
       schemaDiff,
       neonSchemaDiff: neonDiff,
@@ -229,9 +232,12 @@ export function printBranchReport(report: BranchReport): void {
   console.log(`Mode        ${report.mode === "neon" ? "Neon branch (copy-on-write)" : "direct connection pair"}`);
 
   if (typeof report.branch.writtenDataBytes === "number") {
+    const note =
+      report.branch.writtenDataBytes === 0
+        ? "(Neon metric reported 0 B; it can lag — see branch writes)"
+        : "(Neon written_data_bytes)";
     console.log(
-      `COW writes  ${bold(formatBytes(report.branch.writtenDataBytes))} ` +
-        dim("(Neon written_data_bytes: data this branch wrote itself)"),
+      `COW writes  ${bold(formatBytes(report.branch.writtenDataBytes))} ${dim(note)}`,
     );
   }
 
@@ -244,6 +250,12 @@ export function printBranchReport(report: BranchReport): void {
   console.log(
     `Rows          ${formatNumber(report.base.totalRows)} → ${formatNumber(report.compare.totalRows)} ` +
       `(${paintDeltaText(formatSigned(report.rowDelta), report.rowDelta)})`,
+  );
+  console.log(
+    `Branch writes +${formatNumber(report.branchWrites.inserts)} ins / ` +
+      `+${formatNumber(report.branchWrites.updates)} upd / ` +
+      `${formatNumber(report.branchWrites.deletes)} del ` +
+      dim("(compute-local pg_stat_user_tables)"),
   );
 
   console.log("");
