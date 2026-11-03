@@ -50,7 +50,9 @@ async function main(): Promise<void> {
           branches.map((branch) => {
             const parent = branch.parentId ? byId.get(branch.parentId) : undefined;
             const delta =
-              parent && parent.logicalSize > 0
+              parent &&
+              parent.logicalSize > 0 &&
+              branch.logicalSize > 0
                 ? branch.logicalSize - parent.logicalSize
                 : undefined;
             return [

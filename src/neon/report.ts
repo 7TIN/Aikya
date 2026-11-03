@@ -307,6 +307,10 @@ export function printBranchReport(report: BranchReport): void {
           dim("(billed on the branch delta, capped at logical size)"),
       );
     }
+  } else if (report.mode === "neon") {
+    console.log(
+      `Neon logical  n/a ${dim("(Neon has not reported logical_size for this branch yet)")}`,
+    );
   }
 
   console.log(

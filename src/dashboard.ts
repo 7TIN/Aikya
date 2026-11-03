@@ -236,7 +236,9 @@ async function load() {
 
       const parent = branch.parentId ? byId.get(branch.parentId) : undefined;
       const delta =
-        parent && parent.logicalSize > 0
+        parent &&
+        parent.logicalSize > 0 &&
+        branch.logicalSize > 0
           ? branch.logicalSize - parent.logicalSize
           : undefined;
 
@@ -285,6 +287,8 @@ async function runReport(name, output, button) {
         lines.push("  child storage: ~" + formatBytes(report.estimatedBranchStorageBytes) +
           "  (billed on branch delta, capped at logical size)");
       }
+    } else if (report.mode === "neon") {
+      lines.push("  neon logical:  n/a  (Neon has not reported logical_size for this branch yet)");
     }
     if (typeof report.branch.writtenDataBytes === "number") {
       lines.push("  neon writes:   " + formatBytes(report.branch.writtenDataBytes) +

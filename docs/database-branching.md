@@ -66,6 +66,11 @@ The branch inherited 72,426 rows instead of re-inserting them, and added under
 1 MB of new pages. That is COW working. `written_data_bytes` can still read
 `0 B` on this project, so treat it as a bonus signal, not proof.
 
+A brand-new branch can show `logical size: n/a` and `Δ parent: —` until Neon
+populates `logical_size` asynchronously. That is normal. `branch:report` still
+connects to the branch and prints the live `pg_database_size` delta, which should
+be `0 B` for a branch with no writes.
+
 Use cases this repo is building toward:
 
 1. **Pull request previews** — one branch per PR, tests run against real schema
@@ -625,6 +630,7 @@ another 500 orders to the existing branch.
 | `prepared statement already exists` | pooled endpoint | keep `prepare: false` (already set) |
 | migrations hang | using pooled URL for DDL | use `DATABASE_URL_UNPOOLED` |
 | report shows 19.9 MB branch, parent 19.2 MB | branch logical size includes inherited COW pages | read `Branch delta` / `Neon logical` delta, not the absolute size |
+| `branch:list` shows `logical size: n/a` for a new branch | Neon has not populated `logical_size` yet | run `branch:report`; `pg_database_size` and its delta are live |
 | `0 B` Neon writes / `written_data_bytes` | lagging or unreported metric | use the logical-size delta and `pg_stat_user_tables` writes |
 
 ### Delete the lab project

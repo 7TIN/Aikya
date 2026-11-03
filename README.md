@@ -180,6 +180,9 @@ docs/               Phase plan and runbook
   branch's own growth is the parent→branch delta, which is what Neon bills for a
   child branch (capped at logical size). Pair that with `pg_stat_user_tables`
   write activity; `written_data_bytes` can lag or report `0`.
+- A brand-new branch can show `logical size: n/a` in `branch:list` until Neon
+  populates `logical_size`. Run `branch:report`; the live `pg_database_size`
+  delta should be `0 B` for a branch with no writes.
 - The lab started as a Claimable Neon project and is now claimed. Claiming
   rotates the connection string and drops the CLI's pre-claim credential; run
   `neon login` (or set `NEON_API_KEY`) and `neon env pull` if needed. The
