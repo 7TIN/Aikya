@@ -8,6 +8,7 @@ import {
   renderTable,
 } from "../lib/format.ts";
 import { flagBool, flagString, parseArgs } from "../lib/args.ts";
+import { formatDuration, parseDuration } from "../lib/duration.ts";
 import {
   branchConnectionString,
   createBranch,
@@ -16,7 +17,9 @@ import {
   neonSchemaDiff,
 } from "../neon/branches.ts";
 import { parentBranchName } from "../neon/cli.ts";
+import { selectPrunable } from "../neon/prune.ts";
 import { buildBranchReport, printBranchReport } from "../neon/report.ts";
+import { printCowVerification, verifyCow } from "../neon/verify.ts";
 
 function fail(error: unknown): never {
   console.error("");
@@ -164,6 +167,136 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "verify-cow": {
+      const parent = flagString(flags, "parent") ?? parentBranchName();
+      const name = flagString(flags, "name");
+      const keep = flagBool(flags, "keep");
+
+      const result = await verifyCow({ parent, name, keep });
+
+      if (json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        printCowVerification(result);
+      }
+
+      if (!result.pass) process.exitCode = 1;
+      return;
+    }
+
+    case "prune": {
+      const olderThanText = flagString(flags, "older-than") ?? "7d";
+      const olderThanMs = parseDuration(olderThanText);
+      const parent = flagString(flags, "parent") ?? parentBranchName();
+      const prefix = flagString(flags, "prefix");
+      const yes = flagBool(flags, "yes");
+      const dryRun = !yes || flagBool(flags, "dry-run");
+
+      const branches = await listBranches();
+      const candidates = selectPrunable(branches, {
+        olderThanMs,
+        prefix,
+        parentName: parent,
+      });
+
+      const deleted: string[] = [];
+      const failed: Array<{ branch: string; error: string }> = [];
+
+      if (!dryRun) {
+        for (const candidate of candidates) {
+          try {
+            await deleteBranch(candidate.branch.name);
+            deleted.push(candidate.branch.name);
+          } catch (error) {
+            failed.push({
+              branch: candidate.branch.name,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
+
+      if (json) {
+        console.log(
+          JSON.stringify(
+            {
+              olderThan: olderThanText,
+              prefix: prefix ?? null,
+              dryRun,
+              candidates: candidates.map((candidate) => ({
+                name: candidate.branch.name,
+                createdAt: candidate.branch.createdAt,
+                expiresAt: candidate.branch.expiresAt ?? null,
+                ageMs: candidate.ageMs,
+                reason: candidate.reason,
+              })),
+              deleted,
+              failed,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        console.log("");
+        console.log(bold(paint("cyan", "Branch retention")));
+        console.log("─".repeat(96));
+        console.log(
+          `Policy      older than ${bold(olderThanText)}` +
+            (prefix ? ` · prefix ${bold(prefix)}` : "") +
+            ` · parent ${bold(parent)}`,
+        );
+        console.log(`Mode        ${dryRun ? "dry run" : "delete"}`);
+
+        if (candidates.length === 0) {
+          console.log("");
+          console.log(dim("No branches match the retention policy."));
+        } else {
+          console.log("");
+          console.log(
+            renderTable(
+              ["branch", "created", "age", "expires", "reason"],
+              candidates.map((candidate) => [
+                candidate.branch.name,
+                formatDate(candidate.branch.createdAt),
+                formatDuration(candidate.ageMs),
+                candidate.branch.expiresAt
+                  ? formatDate(candidate.branch.expiresAt)
+                  : "—",
+                candidate.reason,
+              ]),
+            ),
+          );
+
+          if (dryRun) {
+            console.log(
+              dim(
+                "\nDry run. Re-run with --yes to delete these branches, or narrow with --prefix.",
+              ),
+            );
+          } else {
+            console.log(
+              `\n✔ Deleted ${deleted.length} branch${deleted.length === 1 ? "" : "es"}.`,
+            );
+          }
+        }
+
+        if (failed.length > 0) {
+          console.log("");
+          for (const failure of failed) {
+            console.error(
+              paint("red", `✖ ${failure.branch}: ${failure.error}`),
+            );
+          }
+          process.exitCode = 1;
+        }
+        console.log("");
+      }
+
+      if (failed.length > 0) process.exitCode = 1;
+      return;
+    }
+
     default: {
       console.error(
         [
@@ -175,8 +308,10 @@ async function main(): Promise<void> {
           "  report <branch> [--parent main]       Storage + schema comparison",
           "  report --base-url U --branch-url U    Compare two arbitrary databases",
           "  diff <base> <compare>                 Neon schema-diff",
+          "  verify-cow [--parent main]            Create, check, and delete a no-write branch",
+          "  prune [--older-than 7d] [--yes]       List/delete stale branches (dry run by default)",
           "",
-          "Add --json to list/report for machine-readable output.",
+          "Add --json to list/report/verify-cow/prune for machine-readable output.",
         ].join("\n"),
       );
       process.exit(1);

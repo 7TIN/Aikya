@@ -22,6 +22,8 @@
     "branch:delete": "bun run src/cli/branch.ts delete",
     "branch:report": "bun run src/cli/branch.ts report",
     "branch:diff": "bun run src/cli/branch.ts diff",
+    "branch:verify-cow": "bun run src/cli/branch.ts verify-cow",
+    "branch:prune": "bun run src/cli/branch.ts prune",
     "branch:demo": "bun run src/cli/demo.ts",
     "demo": "bun run src/cli/demo.ts"
   },

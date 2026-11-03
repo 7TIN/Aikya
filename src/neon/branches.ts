@@ -16,6 +16,8 @@ export interface NeonBranch {
   stateChangedAt: string;
   createdAt: string;
   updatedAt: string;
+  /** Optional Neon branch expiration, used by retention jobs. */
+  expiresAt?: string;
   /** Neon's logical size for the whole branch (all databases, inherited + local). */
   logicalSize: number;
   writtenDataBytes: number;
@@ -36,6 +38,7 @@ interface RawBranch {
   state_changed_at?: string;
   created_at: string;
   updated_at: string;
+  expires_at?: string;
   logical_size?: number;
   written_data_bytes?: number;
   cpu_used_sec?: number;
@@ -56,6 +59,7 @@ function toBranch(raw: RawBranch): NeonBranch {
     stateChangedAt: raw.state_changed_at ?? "",
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
+    expiresAt: raw.expires_at,
     logicalSize: Number(raw.logical_size ?? 0),
     writtenDataBytes: Number(raw.written_data_bytes ?? 0),
     cpuUsedSec: Number(raw.cpu_used_sec ?? 0),

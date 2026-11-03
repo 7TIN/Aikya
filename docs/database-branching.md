@@ -151,7 +151,7 @@ this lab (now claimed). The wrapper in `src/neon/cli.ts` is the seam to replace 
 
 | Phase | Outcome | Status |
 | --- | --- | --- |
-| 1 | Baseline DB, seed data, manual branch, storage + schema report | Built; `demo-coupons` branch created and reported |
+| 1 | Baseline DB, seed data, manual branch, storage + schema report | Complete; COW verified, retention command added |
 | 2 | PR previews and ephemeral CI branches, automatic cleanup | Planned |
 | 3 | Staging/testing branches, refresh and promotion workflow | Planned |
 | 4 | Per-agent sandboxes with TTL, quotas, and guardrails | Planned |
@@ -159,7 +159,7 @@ this lab (now claimed). The wrapper in `src/neon/cli.ts` is the seam to replace 
 
 ---
 
-## Phase 1 — baseline + manual branching (current)
+## Phase 1 — baseline + manual branching (complete)
 
 ### Goal
 
@@ -183,6 +183,9 @@ Prove the mechanics on a real database before automating anything:
 | Schema snapshot + structural diff | `src/db/schema-snapshot.ts`, `src/db/diff.ts` |
 | Neon CLI wrapper | `src/neon/cli.ts`, `src/neon/branches.ts` |
 | Branch report | `src/neon/report.ts` |
+| COW verifier | `src/neon/verify.ts` |
+| Retention selection | `src/neon/prune.ts` |
+| Duration parsing | `src/lib/duration.ts` |
 | Operator CLI | `src/cli/branch.ts`, `src/cli/stats.ts`, `src/cli/sql.ts`, `src/cli/demo.ts` |
 | Branch-only feature SQL | `src/db/features/001-coupons.sql`, `002-coupons-data.sql` |
 | API + dashboard | `src/index.ts`, `src/dashboard.ts` |
@@ -207,6 +210,8 @@ bun run branch:create --name demo-coupons --parent main
 bun run branch:report demo-coupons
 bun run branch:diff main demo-coupons
 bun run branch:delete demo-coupons --yes
+bun run branch:verify-cow              # create → assert pure COW → delete
+bun run branch:prune --older-than 7d   # dry run by default
 
 bun run branch:demo      # branch → feature migration → branch data → report
 bun run dev              # dashboard at http://localhost:3000
@@ -221,6 +226,52 @@ The report can also compare **any two databases** without the Neon CLI:
 ```bash
 bun run branch:report --base-url "$BASE_URL" --branch-url "$BRANCH_URL"
 ```
+
+### Verify copy-on-write
+
+`branch:verify-cow` creates a temporary no-write branch and asserts that it is a
+pure COW clone:
+
+```bash
+bun run branch:verify-cow
+```
+
+```text
+COW verification
+────────────────────────────────────────────────────────────────────────
+Branch  cow-verify-...  (from main)
+
+✔ branch-local size delta is 0 B  (0 B)
+✔ row count matches parent  (72,426 rows (72,426 inherited))
+✔ no table row/size changes  (all tables identical)
+✔ no branch-local writes  (0 ins / 0 upd / 0 del)
+✔ schema matches parent  (no differences)
+
+PASS  the branch inherited its parent's data without copying it.
+Deleted the temporary verification branch.
+```
+
+The verifier is a useful pre-flight check after changing branch tooling, and can
+be wired into CI. Use `--keep` to inspect the branch, `--name` to choose its
+name, and `--json` for machine-readable output. It exits non-zero if any check
+fails.
+
+### Prune stale branches
+
+`branch:prune` lists branches older than a threshold. It is a **dry run unless
+you pass `--yes`**, and it never selects `main`, the default/primary branch, a
+protected branch, or the configured parent.
+
+```bash
+bun run branch:prune                       # dry run, 7d
+bun run branch:prune --older-than 24h
+bun run branch:prune --prefix preview/ --older-than 7d
+bun run branch:prune --prefix preview/ --older-than 7d --yes
+```
+
+Durations accept `s`, `m`, `h`, or `d` (for example `30s`, `24h`, `7d`).
+Expired branches are selected even if they are younger than the threshold.
+`--json` emits the candidate list and deletion results for automation.
 
 ### What the report contains
 
@@ -318,7 +369,10 @@ To use your own Neon project instead:
 - [x] Bun API + dashboard running against Neon.
 - [x] `branch:demo` executed against a claimed project.
 - [x] Branch report includes storage, rows, schema diff, and write activity.
-- [ ] Branch deleted through the CLI and confirmed gone from `branch:list`.
+- [x] COW proof: a no-write branch has 0 B delta, 0 writes, and identical rows/schema.
+- [x] `branch:verify-cow` makes that proof repeatable and self-cleaning.
+- [x] `branch:prune` provides dry-run-first TTL cleanup.
+- [x] A branch was deleted through the CLI and confirmed gone from `branch:list`.
 
 ---
 
@@ -406,7 +460,8 @@ jobs:
 - [ ] Add a `ci` role with least privilege (separate from the owner role).
 - [ ] Choose seeding strategy: full seed, schema-only + seed, or snapshot.
 - [ ] Post the report as a PR comment (sticky comment, not one per push).
-- [ ] Add a scheduled cleanup job for branches past `expires_at`.
+- [ ] Add a scheduled cleanup job for branches past `expires_at` (wrap
+  `bun run branch:prune --prefix preview/ --older-than 7d --yes`).
 - [ ] Fail the job if a branch already exists (don't silently reuse stale data).
 - [ ] Test two PRs in parallel to prove isolation.
 

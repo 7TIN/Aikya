@@ -65,6 +65,8 @@ can keep working independently.
 | `bun run branch:report <branch>` | Storage + schema diff vs parent (`--json`, `--neon-diff`) |
 | `bun run branch:diff <base> <compare>` | Neon's own schema diff |
 | `bun run branch:delete <branch> --yes` | Delete a branch |
+| `bun run branch:verify-cow` | Create a no-write branch, assert 0 B delta, delete it |
+| `bun run branch:prune` | List/delete stale branches (dry run by default) |
 | `bun run branch:demo` | Create branch → feature SQL → branch data → report |
 | `bun run branch:report --base-url U --branch-url U` | Compare any two databases |
 
@@ -131,6 +133,27 @@ bun run branch:demo --name demo-coupons-tmp --cleanup
 `--reuse` applies the demo data again (adding another 500 orders), so
 delete-and-recreate is the cleanest way to repeat the test.
 
+### Verify COW and clean up
+
+```bash
+bun run branch:verify-cow
+```
+
+Creates a temporary no-write branch and asserts that it has the same rows,
+schema, and size as its parent, with zero branch-local writes and a `0 B` size
+delta. It deletes the branch automatically and exits non-zero if a check fails.
+Use `--keep`, `--name`, or `--json` if needed.
+
+```bash
+bun run branch:prune --older-than 7d              # dry run
+bun run branch:prune --older-than 7d --yes        # delete
+bun run branch:prune --prefix preview/ --yes      # only preview branches
+```
+
+`branch:prune` never selects `main`, the default/primary branch, protected
+branches, or the configured parent. Expired branches are selected regardless of
+age.
+
 The dashboard's top cards and table list use `DATABASE_URL` (main). Branch
 cards and **Run report** open separate connections, so the branch comparison is
 always against its parent.
@@ -167,6 +190,10 @@ src/
     cli.ts          Neon CLI wrapper
     branches.ts     Branch operations
     report.ts       Storage + schema report
+    verify.ts       No-write COW verification
+    prune.ts        Retention candidate selection
+  lib/
+    duration.ts     30s/30m/24h/7d parsing for TTLs
   cli/              Operator scripts
 drizzle/            Baseline migrations
 docs/               Phase plan and runbook
