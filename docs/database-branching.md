@@ -152,7 +152,7 @@ this lab (now claimed). The wrapper in `src/neon/cli.ts` is the seam to replace 
 | Phase | Outcome | Status |
 | --- | --- | --- |
 | 1 | Baseline DB, seed data, manual branch, storage + schema report | Complete; COW verified, retention command added |
-| 2 | PR previews and ephemeral CI branches, automatic cleanup | Planned |
+| 2 | PR previews and ephemeral CI branches, automatic cleanup | Local simulator + workflow built; GitHub activation pending |
 | 3 | Staging/testing branches, refresh and promotion workflow | Planned |
 | 4 | Per-agent sandboxes with TTL, quotas, and guardrails | Planned |
 | 5 | Metrics, cost visibility, retention jobs, dashboards | Planned |
@@ -386,91 +386,175 @@ report is posted to the PR, and the branch is deleted when the PR closes.
 ### Flow
 
 ```
-pull_request.opened/synchronize
-  → sanitize branch name: preview/pr-<number>
+pull_request.opened / reopened
+  → name = preview/pr-<number>
+  → delete stale branch if present
   → neon branch create --parent main --expires-at <+7d>
-  → connection string → DATABASE_URL for the job
-  → bun run db:migrate
-  → seed (or restore a snapshot / schema-only + seed)
-  → bun run test
-  → bun run branch:report preview/pr-<number> --json
-  → comment report on PR
+  → branch connection string → DATABASE_URL for the job
+  → bun run src/db/migrate.ts          (inherit main + apply PR migrations)
+  → bun test
+  → build branch report vs main
+  → write report.json + comment.md
+  → post/update one sticky PR comment
+
+pull_request.synchronize
+  → delete + recreate the branch, then the same steps
 
 pull_request.closed
-  → neon branch delete preview/pr-<number>
+  → delete preview/pr-<number>
+
+fork pull request
+  → skip entirely; no branch, no secrets
 ```
 
-### GitHub Actions sketch
+The default is **inherit + migrate**. The branch starts with the parent's
+realistic 72k rows, then the PR's migrations run against that data. Pass
+`--reset` to drop the schema, migrate, and reseed from scratch instead.
+
+### What is implemented
+
+| Piece | Location |
+| --- | --- |
+| Event parsing, PR-number validation, branch naming | `src/ci/events.ts` |
+| Preview orchestration (create/recreate/delete/skip) | `src/ci/preview.ts` |
+| Sticky comment renderer | `src/ci/comment.ts` |
+| Branch-scoped command runner + test summary parsing | `src/ci/run.ts` |
+| CLI wrapper | `src/cli/ci.ts` |
+| Local artifacts | `artifacts/preview/pr-<n>/report.json`, `comment.md` |
+| GitHub Actions wrapper | `.github/workflows/db-preview.yml` |
+| Scheduled cleanup backstop | `.github/workflows/db-preview-cleanup.yml` |
+
+### Local simulator
+
+The full pipeline can be exercised without GitHub or a second account. It uses
+the Neon credentials already in `.env.local`:
+
+```bash
+bun run ci:preview --pr 123 --event opened
+bun run ci:preview --pr 123 --event synchronize
+bun run ci:preview --pr 123 --event reopened
+bun run ci:cleanup --pr 123          # same as --event closed
+```
+
+Flags: `--parent`, `--name` (sanitized override), `--expires-in 7d`, `--reset`,
+`--no-tests`, `--fork`, `--artifacts-dir`, `--json`.
+
+The command is idempotent: `opened` replaces a stale branch, `synchronize`
+always deletes and recreates, and `closed` treats an already-absent branch as
+success. Exit code is non-zero on failure.
+
+Fork PRs are simulated with `--fork`; the command skips branch creation and
+still writes a comment explaining why.
+
+Output example:
+
+```text
+Database preview
+────────────────────────────────────────────────────────────────────────
+PR         #123 (synchronize)
+Status     ✔ READY
+Branch     preview/pr-123 (parent main)
+Expires    2026-11-10T05:16:50.308Z
+Action     recreate — synchronize replaces the branch so no stale schema or data survives
+
+✔ delete existing branch  (3s)
+✔ create branch  (6s)
+✔ migrate  (1s)
+✔ tests  (1s)
+✔ report  (7s)
+
+Branch delta
+Storage     0 B (new pages since branch creation)
+Rows        72,426 → 72,426 (0)
+Writes      +0 ins / +0 upd / 0 del
+Schema      no changes
+```
+
+### GitHub Actions
+
+`.github/workflows/db-preview.yml` is a thin wrapper around the same CLI. It
+checks out the PR commit, installs Bun and the Neon CLI, runs
+`src/cli/ci.ts preview`, uploads artifacts, and posts/updates one sticky comment
+using the `<!-- db-preview-report -->` marker.
+
+Repository setup:
+
+| Kind | Name | Purpose |
+| --- | --- | --- |
+| Secret | `NEON_API_KEY` | Create/delete branches and read connection strings |
+| Variable | `NEON_PROJECT_ID` | Select the Neon project |
+
+Permissions are `contents: read` and `pull-requests: write`. A concurrency
+group per PR cancels superseded `synchronize` runs but never cancels `closed`.
+
+**Fork policy.** The job has:
 
 ```yaml
-name: db-preview
-on:
-  pull_request:
-    types: [opened, synchronize, reopened, closed]
-
-concurrency:
-  group: db-preview-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
-jobs:
-  preview:
-    if: github.event.action != 'closed'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: npm i -g neon
-      - name: Create branch
-        env:
-          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
-          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
-        run: |
-          NAME="preview/pr-${{ github.event.pull_request.number }}"
-          neon branch create --project-id "$NEON_PROJECT_ID" \
-            --name "$NAME" --parent main --no-secrets \
-            --expires-at "$(date -u -d '+7 days' +%Y-%m-%dT%H:%M:%SZ)"
-          URL=$(neon connection-string "$NAME" --project-id "$NEON_PROJECT_ID" --pooled)
-          echo "DATABASE_URL=$URL" >> "$GITHUB_ENV"
-      - run: bun run db:migrate
-      - run: bun run test
-      - name: Report
-        env:
-          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
-          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
-        run: bun run branch:report "preview/pr-${{ github.event.pull_request.number }}" --json > report.json
-
-  cleanup:
-    if: github.event.action == 'closed'
-    runs-on: ubuntu-latest
-    steps:
-      - run: npm i -g neon
-      - env:
-          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
-          NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
-        run: |
-          neon branch delete "preview/pr-${{ github.event.pull_request.number }}" \
-            --project-id "$NEON_PROJECT_ID" || true
+if: github.event.pull_request.head.repo.full_name == github.repository
 ```
 
-### Phase 2 tasks
+Fork PRs are skipped because `pull_request` runs from forks receive no
+repository secrets and a read-only token. Using `pull_request_target` to regain
+them would execute untrusted code with secret access, so this pipeline does not
+use it. A fork PR never creates a branch, so there is nothing to clean up.
 
-- [ ] Add `NEON_API_KEY` and `NEON_PROJECT_ID` to repository secrets/variables.
-- [ ] Add branch-name sanitization (only `[a-z0-9-/]`, max length, no collision).
-- [ ] Add a `ci` role with least privilege (separate from the owner role).
-- [ ] Choose seeding strategy: full seed, schema-only + seed, or snapshot.
-- [ ] Post the report as a PR comment (sticky comment, not one per push).
-- [ ] Add a scheduled cleanup job for branches past `expires_at` (wrap
-  `bun run branch:prune --prefix preview/ --older-than 7d --yes`).
-- [ ] Fail the job if a branch already exists (don't silently reuse stale data).
-- [ ] Test two PRs in parallel to prove isolation.
+`.github/workflows/db-preview-cleanup.yml` runs daily and on demand:
+
+```bash
+bun run branch:prune --prefix preview/ --older-than 7d --yes
+```
+
+### Activating on GitHub
+
+The local flow is complete; real Actions runs only need repository configuration.
+No personal password or token needs to be shared with anyone:
+
+1. Push the repo (or a copy) to a repository you control.
+2. In the Neon console, create an API key scoped to the project.
+3. In GitHub: **Settings → Secrets and variables → Actions**.
+   - Secret `NEON_API_KEY` = the Neon API key.
+   - Variable `NEON_PROJECT_ID` = the Neon project id.
+4. Open a pull request from a branch **in the same repository**. The workflow
+   creates `preview/pr-<n>`, runs migrations/tests, and posts the sticky report.
+5. Push another commit to see `synchronize` replace the branch, then close the
+   PR to see it deleted.
+6. To test the fork policy, fork the repo with a second account and open a PR.
+   The job is skipped, because fork runs get no secrets.
+
+A separate bot account or organization-owned repo is preferable to maintaining
+a second personal account. The pipeline never needs the account credentials
+themselves — only the two repository settings above.
+
+### Phase 2 done criteria
+
+- [x] Deterministic name `preview/pr-<number>` with sanitization and validation.
+- [x] `opened` / `reopened` create or replace the branch with a 7-day expiry.
+- [x] `synchronize` deletes and recreates the branch.
+- [x] `closed` deletes the branch; a second close is a no-op.
+- [x] Fork PRs skip without using secrets.
+- [x] Migrations, tests, and the report run against the branch connection.
+- [x] Migrations run with `DATABASE_URL`/`DATABASE_URL_UNPOOLED` scoped to the branch.
+- [x] Report + comment artifacts are written for every outcome.
+- [x] Connection strings are redacted from captured command output.
+- [x] Local lifecycle verified on Neon: opened → synchronize → fork skip → closed.
+- [x] 7-day `expires_at` confirmed through the Neon API.
+- [x] `--reset` path verified (72,426 inserts, report shows the branch delta).
+- [x] A real new migration applied only on the preview branch; the report showed
+  `+ table preview_smoke` and a `16.0 KB` branch delta. The temporary migration
+  was reverted after the test.
+- [ ] Activate the workflow on a repo with `NEON_API_KEY` and `NEON_PROJECT_ID`.
+- [ ] Prove two PRs run in parallel without interference.
+- [ ] Decide whether to add a maintainer `workflow_dispatch` for fork PRs.
 
 ### Guardrails
 
-- Never echo a connection string; mask it with `::add-mask::`.
-- Do not run PR code against `main` or staging branches.
-- Cap compute (`--cu 0.25-1`) and set `--suspend-timeout 300`.
-- Always set `--expires-at` as a backstop even if cleanup fails.
+- Never print a connection string; `src/ci/run.ts` redacts it from child output.
+- Do not run PR code against `main` or staging branches; the branch is the target.
+- Always set `--expires-at` as a backstop even if PR cleanup fails.
+- Never use `pull_request_target` to run PR code.
+- Branch creation uses `--no-secrets`; the connection string is fetched per run.
+- Free-plan projects allow 10 branches. The cleanup job and 7-day expiry keep
+  previews from crowding out demo branches.
 
 ---
 

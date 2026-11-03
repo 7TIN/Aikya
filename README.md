@@ -69,6 +69,8 @@ can keep working independently.
 | `bun run branch:prune` | List/delete stale branches (dry run by default) |
 | `bun run branch:demo` | Create branch → feature SQL → branch data → report |
 | `bun run branch:report --base-url U --branch-url U` | Compare any two databases |
+| `bun run ci:preview --pr <n> --event <event>` | Local PR preview: create/recreate → migrate → test → report |
+| `bun run ci:cleanup --pr <n>` | Delete a preview branch (closed event) |
 
 `branch:demo` also accepts `--parent`, `--reuse`, `--cleanup`, and `--json`.
 
@@ -154,6 +156,36 @@ bun run branch:prune --prefix preview/ --yes      # only preview branches
 branches, or the configured parent. Expired branches are selected regardless of
 age.
 
+## PR previews (Phase 2)
+
+The preview pipeline can run locally, without GitHub or a second account. It
+creates `preview/pr-<number>` from `main`, applies migrations, runs tests, and
+writes a branch report plus a sticky-comment body:
+
+```bash
+bun run ci:preview --pr 123 --event opened
+bun run ci:preview --pr 123 --event synchronize   # delete + recreate
+bun run ci:cleanup --pr 123                       # closed: delete
+```
+
+Artifacts land in `artifacts/preview/pr-123/` (`report.json`, `comment.md`).
+Use `--reset` to drop/migrate/seed instead of inheriting, `--fork` to simulate a
+fork PR, `--expires-in 7d` to change retention, and `--json` for automation.
+
+```text
+opened/reopened  → create (or replace) → migrate → test → report → comment
+synchronize      → delete + recreate  → migrate → test → report → comment
+closed           → delete
+fork             → skip; never receives secrets
+```
+
+`.github/workflows/db-preview.yml` wraps the same command. It needs a
+`NEON_API_KEY` secret and a `NEON_PROJECT_ID` variable. The job is skipped for
+fork PRs: GitHub does not give them repository secrets, and this pipeline does
+not use `pull_request_target`, which would run untrusted code with secrets.
+`db-preview-cleanup.yml` prunes `preview/` branches older than 7 days as a
+backstop.
+
 The dashboard's top cards and table list use `DATABASE_URL` (main). Branch
 cards and **Run report** open separate connections, so the branch comparison is
 always against its parent.
@@ -192,9 +224,15 @@ src/
     report.ts       Storage + schema report
     verify.ts       No-write COW verification
     prune.ts        Retention candidate selection
+  ci/
+    events.ts       Event parsing, PR validation, branch naming
+    preview.ts      Create/recreate/delete/skip orchestration
+    comment.ts      Sticky PR comment renderer
+    run.ts          Branch-scoped child commands + test parsing
   lib/
     duration.ts     30s/30m/24h/7d parsing for TTLs
   cli/              Operator scripts
+.github/workflows/  PR preview + scheduled cleanup
 drizzle/            Baseline migrations
 docs/               Phase plan and runbook
 ```

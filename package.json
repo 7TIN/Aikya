@@ -25,7 +25,9 @@
     "branch:verify-cow": "bun run src/cli/branch.ts verify-cow",
     "branch:prune": "bun run src/cli/branch.ts prune",
     "branch:demo": "bun run src/cli/demo.ts",
-    "demo": "bun run src/cli/demo.ts"
+    "demo": "bun run src/cli/demo.ts",
+    "ci:preview": "bun run src/cli/ci.ts preview",
+    "ci:cleanup": "bun run src/cli/ci.ts cleanup"
   },
   "devDependencies": {
     "@types/bun": "latest",

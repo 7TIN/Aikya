@@ -1,0 +1,113 @@
+name: db-preview
+
+# Phase 2 PR previews. The branch logic lives in src/ci/preview.ts; this
+# workflow is a thin wrapper so the same flow can be exercised locally with
+# `bun run ci:preview`.
+#
+# Required repository configuration:
+#   secret   NEON_API_KEY     Neon API key (never exposed to fork PRs)
+#   variable NEON_PROJECT_ID  Neon project id
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: db-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event.action != 'closed' }}
+
+jobs:
+  preview:
+    # Fork PRs get no repository secrets and a read-only token. Skip them
+    # entirely; do NOT switch to pull_request_target, which would run untrusted
+    # code with secret access. Fork PRs have no preview branch to clean up.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+      NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+    steps:
+      # The PR merge ref is the right code for open/synchronize runs. After a
+      # close it may be unavailable, and cleanup only needs the base branch.
+      - uses: actions/checkout@v4
+        if: github.event.action != 'closed'
+
+      - uses: actions/checkout@v4
+        if: github.event.action == 'closed'
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Neon CLI
+        run: npm install --global neon@latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run preview pipeline
+        id: preview
+        continue-on-error: true
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT: ${{ github.event.action }}
+        run: |
+          bun run src/cli/ci.ts preview \
+            --pr "$PR_NUMBER" \
+            --event "$EVENT" \
+            --json | tee preview-result.json
+          status=${PIPESTATUS[0]}
+          echo "exit_code=${status}" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Upload preview artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-preview-pr-${{ github.event.pull_request.number }}
+          path: |
+            preview-result.json
+            artifacts/preview/pr-${{ github.event.pull_request.number }}/
+          if-no-files-found: ignore
+
+      - name: Post or update sticky comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          body="artifacts/preview/pr-${PR_NUMBER}/comment.md"
+          if [ ! -f "$body" ]; then
+            echo "No comment artifact; skipping comment."
+            exit 0
+          fi
+
+          url="repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+          id="$(gh api --paginate "$url" \
+            --jq '.[] | select(.body | contains("<!-- db-preview-report -->")) | .id' \
+            | head -n 1)"
+
+          jq -n --rawfile text "$body" '{body: $text}' > /tmp/db-preview-comment.json
+
+          if [ -n "$id" ]; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" \
+              --input /tmp/db-preview-comment.json > /dev/null
+            echo "Updated existing preview comment ${id}."
+          else
+            gh api --method POST "$url" \
+              --input /tmp/db-preview-comment.json > /dev/null
+            echo "Created preview comment."
+          fi
+
+      - name: Fail if preview failed
+        if: steps.preview.outcome == 'failure'
+        run: |
+          echo "Preview pipeline failed; see db-preview-pr-${{ github.event.pull_request.number }} artifacts."
+          exit 1

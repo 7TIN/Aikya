@@ -1,0 +1,35 @@
+name: db-preview-cleanup
+
+# Backstop for preview branches whose PR cleanup was missed or whose
+# expires_at was not honored. `branch:prune` never selects main, the
+# default/primary branch, protected branches, or the parent branch.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    env:
+      NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+      NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Neon CLI
+        run: npm install --global neon@latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Prune stale preview branches
+        run: bun run branch:prune --prefix preview/ --older-than 7d --yes
