@@ -15,6 +15,8 @@ export interface SelectPrunableOptions {
   prefix?: string;
   /** Never prune the parent branch. */
   parentName: string;
+  /** Long-lived environment branches that must never be pruned. */
+  protectedNames?: string[];
   /** Injectable clock for tests. */
   now?: number;
 }
@@ -23,9 +25,9 @@ export interface SelectPrunableOptions {
  * Select branches eligible for retention cleanup. Pure function so the policy
  * can be tested without touching Neon.
  *
- * Safety rules: never select main, the default/primary branch, a protected
- * branch, or the configured parent. An expired branch is eligible even if it is
- * younger than the age threshold.
+ * Safety rules: never select main, the default/primary branch, a Neon-protected
+ * branch, the configured parent, or a named environment branch. An expired
+ * branch is eligible even if it is younger than the age threshold.
  */
 export function selectPrunable(
   branches: NeonBranch[],
@@ -36,6 +38,10 @@ export function selectPrunable(
   return branches
     .filter((branch) => !branch.default && !branch.primary && !branch.protected)
     .filter((branch) => branch.name !== "main" && branch.name !== options.parentName)
+    .filter(
+      (branch) =>
+        !options.protectedNames || !options.protectedNames.includes(branch.name),
+    )
     .filter(
       (branch) => !options.prefix || branch.name.startsWith(options.prefix),
     )

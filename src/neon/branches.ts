@@ -156,6 +156,22 @@ export async function deleteBranch(name: string): Promise<void> {
   ]);
 }
 
+/**
+ * Reset a branch to its parent without changing its id or connection string.
+ * Used by `branch:reset` for long-lived environment branches.
+ */
+export async function resetBranchToParent(name: string): Promise<NeonBranch> {
+  await runNeon([
+    "branch",
+    "reset",
+    name,
+    "--project-id",
+    neonProjectId(),
+    "--parent",
+  ]);
+  return waitForBranchReady(name);
+}
+
 /** Connection string for a branch, using the CLI (works with claimed projects). */
 export async function branchConnectionString(
   branch: string,

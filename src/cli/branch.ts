@@ -16,9 +16,17 @@ import {
   listBranches,
   neonSchemaDiff,
 } from "../neon/branches.ts";
+import { environmentNames } from "../env/environments.ts";
 import { parentBranchName } from "../neon/cli.ts";
 import { selectPrunable } from "../neon/prune.ts";
 import { buildBranchReport, printBranchReport } from "../neon/report.ts";
+import {
+  ensureAllEnvironments,
+  ensureEnvironment,
+  printEnsureResults,
+  printResetResult,
+  resetEnvironment,
+} from "../neon/reset.ts";
 import { printCowVerification, verifyCow } from "../neon/verify.ts";
 
 function fail(error: unknown): never {
@@ -167,6 +175,58 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "ensure": {
+      const all = flagBool(flags, "all");
+      const name = positional[1] ?? flagString(flags, "name");
+
+      if (!all && !name) {
+        console.error(
+          "Usage: bun run branch:ensure <environment> | --all\n" +
+            "Known environments: staging, qa.",
+        );
+        process.exit(1);
+      }
+
+      const results = all
+        ? await ensureAllEnvironments()
+        : [await ensureEnvironment(name as string)];
+
+      if (json) {
+        console.log(JSON.stringify(results, null, 2));
+      } else {
+        printEnsureResults(results);
+      }
+      return;
+    }
+
+    case "reset": {
+      const name = positional[1] ?? flagString(flags, "name");
+      if (!name) {
+        console.error(
+          "Usage: bun run branch:reset <environment> [--yes] [--dry-run] [--skip-smoke]\n" +
+            "Known environments: staging, qa.",
+        );
+        process.exit(1);
+      }
+
+      const result = await resetEnvironment({
+        name,
+        yes: flagBool(flags, "yes"),
+        dryRun: flagBool(flags, "dry-run"),
+        skipSmoke: flagBool(flags, "skip-smoke"),
+        artifactsDir: flagString(flags, "artifacts-dir"),
+      });
+
+      if (json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        printResetResult(result);
+      }
+
+      if (result.status === "failed") process.exitCode = 1;
+      return;
+    }
+
     case "verify-cow": {
       const parent = flagString(flags, "parent") ?? parentBranchName();
       const name = flagString(flags, "name");
@@ -197,6 +257,7 @@ async function main(): Promise<void> {
         olderThanMs,
         prefix,
         parentName: parent,
+        protectedNames: environmentNames(),
       });
 
       const deleted: string[] = [];
@@ -308,10 +369,13 @@ async function main(): Promise<void> {
           "  report <branch> [--parent main]       Storage + schema comparison",
           "  report --base-url U --branch-url U    Compare two arbitrary databases",
           "  diff <base> <compare>                 Neon schema-diff",
+          "  ensure <environment> | --all          Create staging/qa if missing",
+          "  reset <environment> [--yes]           Pre-report → reset to parent → migrate → smoke",
           "  verify-cow [--parent main]            Create, check, and delete a no-write branch",
           "  prune [--older-than 7d] [--yes]       List/delete stale branches (dry run by default)",
           "",
-          "Add --json to list/report/verify-cow/prune for machine-readable output.",
+          "Environments: staging, qa. They are never selected by prune.",
+          "Add --json to list/report/ensure/reset/verify-cow/prune for machine-readable output.",
         ].join("\n"),
       );
       process.exit(1);

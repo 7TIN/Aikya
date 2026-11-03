@@ -54,6 +54,20 @@ describe("selectPrunable", () => {
     expect(result).toEqual([]);
   });
 
+  test("never selects protected environment branches", () => {
+    const result = selectPrunable(
+      [branch("staging"), branch("qa"), branch("old")],
+      {
+        olderThanMs: 1 * DAY,
+        parentName: "main",
+        protectedNames: ["staging", "qa"],
+        now: NOW,
+      },
+    );
+
+    expect(result.map((entry) => entry.branch.name)).toEqual(["old"]);
+  });
+
   test("respects a prefix and prefers expired branches", () => {
     const result = selectPrunable(
       [

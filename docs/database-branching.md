@@ -153,7 +153,7 @@ this lab (now claimed). The wrapper in `src/neon/cli.ts` is the seam to replace 
 | --- | --- | --- |
 | 1 | Baseline DB, seed data, manual branch, storage + schema report | Complete; COW verified, retention command added |
 | 2 | PR previews and ephemeral CI branches, automatic cleanup | Local simulator + workflow built; GitHub activation pending |
-| 3 | Staging/testing branches, refresh and promotion workflow | Planned |
+| 3 | Staging/testing branches, refresh and promotion workflow | Small version complete: `staging`/`qa`, safe reset, smoke test |
 | 4 | Per-agent sandboxes with TTL, quotas, and guardrails | Planned |
 | 5 | Metrics, cost visibility, retention jobs, dashboards | Planned |
 
@@ -558,57 +558,127 @@ themselves — only the two repository settings above.
 
 ---
 
-## Phase 3 — staging and testing environments
+## Phase 3 — staging and testing environments (small version complete)
 
 ### Goal
 
-Map environments to long-lived branches and make refresh/promotion boring.
+Give long-lived environments their own branches and make refresh boring and safe:
 
 | Environment | Branch | Data | Lifetime |
 | --- | --- | --- | --- |
 | Production | `main` | real | permanent |
-| Staging | `staging` | anonymized / production-shaped | permanent |
-| QA / testing | `qa` | seeded | permanent, reset daily |
+| Staging | `staging` | inherited deterministic seed | permanent, reset on demand |
+| QA / testing | `qa` | inherited deterministic seed | permanent, reset on demand |
 | PR preview | `preview/pr-<n>` | seeded | 7 days |
 | CI run | `ci/<run-id>` | schema-only + seed | job duration |
 
-### Refresh strategies
+The implemented version covers the operational core: persistent `staging` and
+`qa` branches, a guarded reset, a pre-reset report, and a post-reset smoke test.
+Anonymized staging data and point-in-time incident branches stay deferred until
+there is a real production dataset.
 
-- **Reset to main:** `neon branch reset staging` (or delete + recreate) after a
-  production migration lands.
-- **Schema-only:**
+### What is implemented
+
+| Piece | Location |
+| --- | --- |
+| Environment allowlist (`staging`, `qa`) | `src/env/environments.ts` |
+| Ensure/reset orchestration | `src/neon/reset.ts` |
+| Native reset to parent | `src/neon/branches.ts` (`resetBranchToParent`) |
+| Smoke test (tables, rows, migrations, write rollback) | `src/db/smoke.ts` |
+| Standalone smoke CLI | `src/cli/smoke.ts` |
+| Pre-reset + smoke artifacts | `artifacts/environments/<name>/` |
+
+### Commands
+
+```bash
+bun run branch:ensure --all          # create staging and qa if missing
+bun run branch:ensure staging        # idempotent single environment
+bun run branch:reset staging         # dry run: pre-reset report + plan
+bun run branch:reset staging --yes   # refresh: reset → migrate → smoke
+bun run db:smoke --branch staging    # standalone health check
+```
+
+### Reset flow
+
+```text
+branch:reset <staging|qa>
+  → verify the name is in the environment allowlist
+  → capture a pre-reset report (rows, storage delta, writes, schema diff)
+  → write artifacts/environments/<name>/pre-reset.json
+  → without --yes: stop here (dry run)
+  → with --yes: neon branch reset <name> --parent
+  → apply migrations
+  → smoke test: baseline tables exist, have rows, migrations recorded,
+    transactional write/read/rollback succeeds
+  → write smoke.json
+```
+
+The native `neon branch reset --parent` restores the branch's logical contents
+without changing its id or connection string. That keeps environment URLs
+stable across refreshes.
+
+Example pre-reset snapshot after a test table was added:
+
+```text
+Status       → PLANNED
+
+Pre-reset snapshot
+Storage      +32.0 KB (branch-local since creation)
+Rows         72,426 → 72,427 (+1)
+Writes       +1 ins / +0 upd / 0 del
+Schema       changes detected
+```
+
+After `--yes`, the same branch reported `sizeDeltaBytes: 0`, `rowDelta: 0`, and
+`hasChanges: false`; the smoke test passed all four checks with 72,426 baseline
+rows. `qa` was refreshed the same way.
+
+### Safety
+
+- Reset only accepts `staging` or `qa`. `main`, `preview/pr-*`, and ad-hoc
+  branches are rejected by the allowlist.
+- Replacing an existing environment requires `--yes`; otherwise the command is
+  a dry run that still writes the pre-reset snapshot.
+- Default, primary, and Neon-protected branches are refused even if renamed.
+- Environment branches have no expiry and are excluded from `branch:prune`.
+- The pre-reset report is written **before** the destructive call, so the last
+  state is inspectable even if the refresh fails.
+- `branch:reset` restores logical contents; Neon may retain billing/history
+  pages, so the logical-size delta is not guaranteed to drop to zero.
+
+### Phase 3 done criteria
+
+- [x] Persistent `staging` and `qa` branches created from `main`.
+- [x] Environment allowlist; `main` and arbitrary branches cannot be reset.
+- [x] `--yes` gate with a safe dry-run default for existing environments.
+- [x] Pre-reset report with rows, storage, writes, and schema diff.
+- [x] Pre-reset artifact written before the destructive step.
+- [x] Reset uses native `branch reset --parent` and preserves branch id/URL.
+- [x] Migrations re-applied after reset.
+- [x] Smoke test validates tables, rows, migration history, and write rollback.
+- [x] Smoke artifacts written; standalone `db:smoke` command added.
+- [x] `branch:prune` excludes `staging` and `qa`.
+- [x] Locally verified: modify staging → dry run captures changes → `--yes`
+  removes them → report is clean → smoke passes; `qa` and safety paths tested.
+- [ ] Anonymized staging seed (deferred until real data exists).
+- [ ] Scheduled daily `qa` reset.
+- [ ] Point-in-time incident branches.
+- [ ] Promotion automation from merge → reset.
+
+### Future Phase 3 work
+
+- **Anonymized staging data:** add `bun run db:seed:staging` once there is a
+  production dataset, and stop inheriting production-shaped rows.
+- **Scheduled QA reset:** run `branch:reset qa --yes` from a nightly workflow.
+- **Incident branches:**
 
   ```bash
-  neon branch create --name qa --parent main --schema-only --no-secrets
-  bun run db:seed
-  ```
-
-- **Point-in-time debug branch:**
-
-  ```bash
-  neon branch create --name incident/2026-11-02 --parent main \
+  neon branch create --name incident/2026-11-02 \
     --parent "main@2026-11-02T08:00:00Z"
   ```
 
-  (Use the appropriate parent/timestamp form for the CLI version; the goal is a
-  branch from a past state, without touching the current branch.)
-
-### Promotion workflow
-
-1. Develop schema changes on a feature branch (or in `src/db/features/*.sql`).
-2. Generate a Drizzle migration: `bun run db:generate`.
-3. Review the generated SQL, commit it, merge through git.
-4. `main` gets the migration on deploy.
-5. Reset/recreate `staging` and `qa` from the new `main`.
-6. Preview branches created after the merge inherit the new baseline.
-
-### Phase 3 tasks
-
-- [ ] Create persistent `staging` and `qa` branches with TTL/ownership defined.
-- [ ] Add `bun run db:seed:staging` with anonymized data rules.
-- [ ] Add a refresh script (`branch:reset`) with a pre-reset report.
-- [ ] Document who can reset staging and how to announce it.
-- [ ] Add a smoke test that runs after every staging refresh.
+- **Promotion automation:** after a merge to `main`, reset `staging`, run the
+  smoke test, and only then allow deployment.
 
 ---
 

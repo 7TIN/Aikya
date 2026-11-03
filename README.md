@@ -65,6 +65,9 @@ can keep working independently.
 | `bun run branch:report <branch>` | Storage + schema diff vs parent (`--json`, `--neon-diff`) |
 | `bun run branch:diff <base> <compare>` | Neon's own schema diff |
 | `bun run branch:delete <branch> --yes` | Delete a branch |
+| `bun run branch:ensure --all` | Create the persistent `staging` and `qa` branches |
+| `bun run branch:reset staging --yes` | Pre-report → reset to parent → migrate → smoke |
+| `bun run db:smoke --branch staging` | Verify tables, rows, migrations, and write rollback |
 | `bun run branch:verify-cow` | Create a no-write branch, assert 0 B delta, delete it |
 | `bun run branch:prune` | List/delete stale branches (dry run by default) |
 | `bun run branch:demo` | Create branch → feature SQL → branch data → report |
@@ -153,8 +156,8 @@ bun run branch:prune --prefix preview/ --yes      # only preview branches
 ```
 
 `branch:prune` never selects `main`, the default/primary branch, protected
-branches, or the configured parent. Expired branches are selected regardless of
-age.
+branches, the configured parent, or the persistent `staging`/`qa` environment
+branches. Expired branches are selected regardless of age.
 
 ## PR previews (Phase 2)
 
@@ -185,6 +188,49 @@ fork PRs: GitHub does not give them repository secrets, and this pipeline does
 not use `pull_request_target`, which would run untrusted code with secrets.
 `db-preview-cleanup.yml` prunes `preview/` branches older than 7 days as a
 backstop.
+
+## Staging and QA environments (Phase 3)
+
+Two persistent branches mirror long-lived environments. They have no expiry and
+are protected from pruning:
+
+```bash
+bun run branch:ensure --all          # create staging + qa if missing
+bun run branch:reset staging         # dry run: pre-reset report + plan
+bun run branch:reset staging --yes   # reset → migrate → smoke
+bun run db:smoke --branch staging    # standalone health check
+```
+
+`branch:reset` only accepts `staging` or `qa`. It captures a pre-reset report
+(rows, storage delta, writes, schema diff) into
+`artifacts/environments/<name>/pre-reset.json` **before** calling Neon's native
+`branch reset --parent`. Without `--yes` it stops after the report. With
+`--yes` it refreshes the branch, re-applies migrations, and runs the smoke test.
+
+```text
+Environment reset
+Environment  staging (parent main)
+Status       ✔ RESET
+
+Pre-reset snapshot
+Storage      +32.0 KB (branch-local since creation)
+Rows         72,426 → 72,427 (+1)
+Writes       +1 ins / +0 upd / 0 del
+Schema       changes detected
+
+✔ pre-reset report
+✔ reset to parent (restored from main)
+✔ migrate
+✔ smoke test (4 checks passed)
+```
+
+The smoke test verifies the baseline tables exist and contain rows, migration
+history is present, and a transactional create/insert/select rolls back cleanly.
+Results are written to `artifacts/environments/<name>/smoke.json`.
+
+Safety rules: the environment allowlist rejects `main` and arbitrary branches;
+replacing an existing environment requires `--yes`; default/primary/protected
+branches are refused; and `branch:prune` never selects `staging` or `qa`.
 
 The dashboard's top cards and table list use `DATABASE_URL` (main). Branch
 cards and **Run report** open separate connections, so the branch comparison is
@@ -217,6 +263,7 @@ src/
     stats.ts        Size and row collection
     schema-snapshot.ts / diff.ts
     sql-file.ts     SQL script runner
+    smoke.ts        Environment health checks + write-rollback probe
     features/       Branch-local feature SQL
   neon/
     cli.ts          Neon CLI wrapper
@@ -224,14 +271,17 @@ src/
     report.ts       Storage + schema report
     verify.ts       No-write COW verification
     prune.ts        Retention candidate selection
+    reset.ts        Pre-report → reset → migrate → smoke
   ci/
     events.ts       Event parsing, PR validation, branch naming
     preview.ts      Create/recreate/delete/skip orchestration
     comment.ts      Sticky PR comment renderer
     run.ts          Branch-scoped child commands + test parsing
+  env/
+    environments.ts Persistent staging/qa allowlist
   lib/
     duration.ts     30s/30m/24h/7d parsing for TTLs
-  cli/              Operator scripts
+  cli/              Operator scripts (includes smoke.ts)
 .github/workflows/  PR preview + scheduled cleanup
 drizzle/            Baseline migrations
 docs/               Phase plan and runbook
