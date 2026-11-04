@@ -30,7 +30,9 @@
     "branch:demo": "bun run src/cli/demo.ts",
     "demo": "bun run src/cli/demo.ts",
     "ci:preview": "bun run src/cli/ci.ts preview",
-    "ci:cleanup": "bun run src/cli/ci.ts cleanup"
+    "ci:cleanup": "bun run src/cli/ci.ts cleanup",
+    "watch": "bun run src/cli/watch.ts",
+    "watch:loop": "bun run src/cli/watch.ts --loop"
   },
   "devDependencies": {
     "@types/bun": "latest",

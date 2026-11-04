@@ -3,7 +3,8 @@
 A working lab for **copy-on-write Postgres branching** with Neon, Bun, TypeScript,
 Drizzle, and the Neon CLI. The destination is a pipeline where every pull
 request, CI run, staging environment, and AI-agent sandbox gets its own isolated
-database branch, plus automated reporting and cleanup.
+database branch, plus automated reporting and cleanup. The local watcher already
+does this for pull requests in an external repository.
 
 - [Why branches](#why-branches)
 - [Mental model](#mental-model)
@@ -11,6 +12,7 @@ database branch, plus automated reporting and cleanup.
 - [Phase plan](#phase-plan)
 - [Phase 1 — baseline + manual branching (current)](#phase-1--baseline--manual-branching-current)
 - [Phase 2 — pull request + CI pipeline](#phase-2--pull-request--ci-pipeline)
+- [Watching an external repository (local watcher)](#watching-an-external-repository-local-watcher)
 - [Phase 3 — staging and testing environments](#phase-3--staging-and-testing-environments)
 - [Phase 4 — agent sandboxes](#phase-4--agent-sandboxes)
 - [Phase 5 — observability, cost, retention](#phase-5--observability-cost-retention)
@@ -112,27 +114,29 @@ Rules that keep this safe:
 ## Architecture
 
 ```
-┌──────────────────────────────┐
-│ Bun + TypeScript             │
-│                              │
-│  src/index.ts    HTTP API    │
-│  src/dashboard.ts UI         │
-│  src/cli/*       operators   │
-│  src/db/*        schema/SQL  │
-│  src/neon/*      branch ops  │
-└──────────────┬───────────────┘
-               │
-      ┌────────┴─────────┐
-      │                  │
-┌─────▼──────┐   ┌───────▼────────────┐
+┌──────────────────────────────────┐
+│ Bun + TypeScript                 │
+│                                  │
+│  src/index.ts    HTTP API        │
+│  src/dashboard.ts UI             │
+│  src/cli/*       operators       │
+│  src/db/*        schema/SQL      │
+│  src/neon/*      branch ops      │
+│  src/github/*    PR watcher ─────┼──► GitHub REST API (read-only)
+└───────────────┬──────────────────┘
+                │
+       ┌────────┴─────────┐
+       │                  │
+┌──────▼─────┐   ┌────────▼───────────┐
 │ postgres.js│   │ neon CLI           │
 │ Drizzle    │   │ branch create/list │
 │ SQL        │   │ connection-string  │
-└─────┬──────┘   │ schema-diff        │
-      │          └───────┬────────────┘
-      └────────┬─────────┘
-               │
-        ┌──────▼───────────────────────────────┐
+└──────┬─────┘   │ schema-diff        │
+       │         └────────┬───────────┘
+       │                  │
+       └────────┬─────────┘
+                │
+        ┌───────▼──────────────────────────────┐
         │ Neon project                          │
         │  main ──┬── preview/pr-142            │
         │         ├── ci/run-8871               │
@@ -152,7 +156,7 @@ this lab (now claimed). The wrapper in `src/neon/cli.ts` is the seam to replace 
 | Phase | Outcome | Status |
 | --- | --- | --- |
 | 1 | Baseline DB, seed data, manual branch, storage + schema report | Complete; COW verified, retention command added |
-| 2 | PR previews and ephemeral CI branches, automatic cleanup | Local simulator + workflow built; GitHub activation pending |
+| 2 | PR previews and ephemeral CI branches, automatic cleanup | Local simulator, workflow, and local external-repo watcher built; real GitHub PR activation pending |
 | 3 | Staging/testing branches, refresh and promotion workflow | Small version complete: `staging`/`qa`, safe reset, smoke test |
 | 4 | Per-agent sandboxes with TTL, quotas, and guardrails | Planned |
 | 5 | Metrics, cost visibility, retention jobs, dashboards | Planned |
@@ -423,6 +427,12 @@ realistic 72k rows, then the PR's migrations run against that data. Pass
 | Local artifacts | `artifacts/preview/pr-<n>/report.json`, `comment.md` |
 | GitHub Actions wrapper | `.github/workflows/db-preview.yml` |
 | Scheduled cleanup backstop | `.github/workflows/db-preview-cleanup.yml` |
+| GitHub REST watcher (pagination, ETags, rate-limit errors) | `src/github/client.ts` |
+| PR → branch reconciliation state machine | `src/github/monitor.ts` |
+| Poll timer, manual sync, watcher status | `src/github/service.ts` |
+| Watcher CLI | `src/cli/watch.ts` |
+| Watcher state | `artifacts/monitor/state.json` (git-ignored) |
+| Dashboard watcher panel + API | `src/dashboard.ts`, `GET /api/watch`, `POST /api/watch/sync` |
 
 ### Local simulator
 
@@ -529,15 +539,90 @@ themselves — only the two repository settings above.
 
 `bun run dev` (http://localhost:3000) reads the preview artifacts and joins them
 with the live Neon branch list. The **Pull request previews** table shows, per
-PR: the event, run status, branch name, live branch state and logical size,
-expiry, row/storage delta, and last run time. **Show run** prints the recorded
-steps, tests, report summary, and sticky comment; **Report** compares the branch
-with its parent on demand.
+PR: the origin repository (or `local`), event, run status, branch name, live
+branch state and logical size, expiry, row/storage delta, and last run time.
+**Show run** prints the recorded steps, tests, report summary, and sticky
+comment; **Report** compares the branch with its parent on demand.
 
 Preview branches that exist in Neon but have no local artifact still appear,
 marked `branch-only`, so an orphaned branch is never hidden. The data comes from
 `GET /api/previews`, which reads `artifacts/preview/*/report.json` and tolerates
 a missing artifact directory or an unreachable Neon CLI.
+
+### Watching an external repository (local watcher)
+
+The GitHub Actions wrapper must live in the repository that owns the pull
+request. For an **external** repository — the test subject
+`https://github.com/7TIN/gh-lab` — Aikya can instead run locally and poll the
+public GitHub API. Nothing is installed in the watched repository: no workflow,
+no bot account, no GitHub App.
+
+```text
+src/github/client.ts    GET /repos/:owner/:repo/pulls   (read-only)
+        │
+src/github/monitor.ts   decide: create / recreate / skip / delete
+        │
+src/ci/preview.ts       create branch → migrate → (tests) → report
+        │
+artifacts/preview/<owner>-<repo>-pr-<n>/
+artifacts/monitor/state.json
+```
+
+Lifecycle:
+
+```text
+open PR, unseen              → create
+open PR, head commit changed → delete + recreate
+open PR, unchanged, ready    → skip
+open PR, previous failure    → retry after 5 minutes
+PR closed or merged          → delete
+```
+
+```bash
+# .env.local
+GITHUB_REPO=7TIN/gh-lab
+GITHUB_POLL_MS=120000          # 120s; unauthenticated API allows 60 req/hour
+# GITHUB_REPOS=owner/one,owner/two
+# GITHUB_TOKEN=...             # optional read-only token: higher limit, private repos
+# GITHUB_WATCH_ON_START=false  # disable the startup sync
+# GITHUB_WATCH_TESTS=false     # branch + migrate only
+```
+
+```bash
+bun run watch --repo 7TIN/gh-lab       # one pass, then exit
+bun run watch:loop --repo 7TIN/gh-lab  # keep polling
+bun run dev                            # server auto-starts the watcher
+```
+
+The dashboard adds a **Watched repository** panel with every tracked PR and a
+**Sync PRs now** button. It reads `GET /api/watch`; the button calls
+`POST /api/watch/sync`. Both work while a scheduled poll is running: the second
+sync is skipped instead of overlapping.
+
+**Repository scoping.** This lab shares one Neon project across all watched
+repositories, so branches and artifacts are namespaced:
+`preview/7tin-gh-lab-pr-7`, `artifacts/preview/7tin-gh-lab-pr-7/`. The
+`preview/pr-<n>` names remain reserved for Aikya's own GitHub Actions preview.
+When the pipeline becomes multi-tenant, give each repository its own Neon
+project rather than relying on the prefix.
+
+**Safety boundaries:**
+
+- Only PR metadata is read. The watched repository's code is never checked out or
+  executed; migrations and tests always come from this project. A fork PR is
+  therefore handled like any other PR here, unlike the Actions wrapper, which
+  runs PR code and must skip forks.
+- A failed GitHub fetch records the error and touches no branches.
+- Deletion runs only after a complete pagination pass, so a truncated response
+  cannot delete a live branch.
+- Each branch keeps a 7-day expiry even if the local watcher is offline.
+- Branch names are capped at 63 characters with the `-pr-<n>` suffix preserved,
+  so long repository names cannot collide.
+
+**Verified locally:** the public API returned `0` open PRs for `7TIN/gh-lab`,
+and a simulated open → closed cycle created and deleted the real branch
+`preview/7tin-gh-lab-pr-9999`. A real pull request on `7TIN/gh-lab` is the
+remaining end-to-end check.
 
 ### Phase 2 done criteria
 
@@ -551,6 +636,14 @@ a missing artifact directory or an unreachable Neon CLI.
 - [x] Report + comment artifacts are written for every outcome.
 - [x] Connection strings are redacted from captured command output.
 - [x] Local lifecycle verified on Neon: opened → synchronize → fork skip → closed.
+- [x] External watcher polls open PRs, paginates, caches ETags, and reports rate-limit/404 errors.
+- [x] Watcher create/recreate/skip/delete/retry decisions are unit tested.
+- [x] Deletions are skipped on partial pagination; failed fetches leave branches alone.
+- [x] Repository-scoped branch and artifact names keep one shared Neon project collision-free.
+- [x] Watcher status + manual sync API and dashboard button verified on localhost.
+- [x] Real GitHub API read verified for `7TIN/gh-lab`; a simulated PR created and deleted a real branch.
+- [ ] Open a real PR on `7TIN/gh-lab` and observe auto-detection end to end.
+- [ ] Give each watched repository its own Neon project for multi-tenant isolation.
 - [x] 7-day `expires_at` confirmed through the Neon API.
 - [x] `--reset` path verified (72,426 inserts, report shows the branch delta).
 - [x] A real new migration applied only on the preview branch; the report showed
@@ -840,6 +933,24 @@ bun run branch:demo --name demo-coupons-tmp --cleanup
 `--reuse` is not a clean reset: it applies the demo data SQL again, adding
 another 500 orders to the existing branch.
 
+### Watch an external repository
+
+```bash
+# one pass (uses GITHUB_REPO when --repo is omitted)
+bun run watch --repo 7TIN/gh-lab
+
+# continuous polling at the configured interval
+bun run watch:loop --repo 7TIN/gh-lab
+
+# inspect or trigger from the dashboard/server
+curl http://localhost:3000/api/watch
+curl -X POST http://localhost:3000/api/watch/sync
+```
+
+Branch names include the repository: `preview/7tin-gh-lab-pr-7`. State lives in
+`artifacts/monitor/state.json`; delete that file only if you want the next poll
+to treat every open PR as new (existing branches are replaced, not duplicated).
+
 ### Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -855,6 +966,10 @@ another 500 orders to the existing branch.
 | report shows 19.9 MB branch, parent 19.2 MB | branch logical size includes inherited COW pages | read `Branch delta` / `Neon logical` delta, not the absolute size |
 | `branch:list` shows `logical size: n/a` for a new branch | Neon has not populated `logical_size` yet | run `branch:report`; `pg_database_size` and its delta are live |
 | `0 B` Neon writes / `written_data_bytes` | lagging or unreported metric | use the logical-size delta and `pg_stat_user_tables` writes |
+| `GitHub API rate limit reached` | unauthenticated limit (60 req/hour per IP) | set a read-only `GITHUB_TOKEN` or raise `GITHUB_POLL_MS` |
+| `GitHub repository ... was not found` | typo, private repo, or no `GITHUB_TOKEN` | check `owner/name`; add a token for private repos |
+| Watched branch has a repo prefix | expected on the shared project | use `preview/<owner>-<repo>-pr-<n>`, not `preview/pr-<n>` |
+| No PRs appear in the watcher panel | `GITHUB_REPO` unset, or the repo has no open PRs | set it in `.env.local`, restart, then press **Sync PRs now** |
 
 ### Delete the lab project
 
@@ -915,6 +1030,15 @@ neon claim delete --yes
 | `NEON_PARENT_BRANCH` | branch create/report | default `main` |
 | `NEON_BRANCH` | report | branch `DATABASE_URL` points at; avoids an extra CLI call |
 | `NEON_API_KEY` | CI | only when the CLI is not signed in |
+| `GITHUB_REPO` | watcher | one public repo, `owner/name`; unset disables the watcher |
+| `GITHUB_REPOS` | watcher | comma-separated list; overrides `GITHUB_REPO` |
+| `GITHUB_TOKEN` | watcher | optional read-only token; higher limit + private repos |
+| `GITHUB_POLL_MS` | watcher | poll interval in ms; default 120000, clamped to 15000 |
+| `GITHUB_WATCH_ON_START` | watcher | `false` disables the startup sync |
+| `GITHUB_WATCH_TESTS` | watcher | `false` skips tests for each preview branch |
+| `GITHUB_WATCH_PARENT` | watcher | fallback parent; `NEON_PARENT_BRANCH` wins |
+| `GITHUB_WATCH_RETRY_MS` | watcher | failure backoff; default 300000 |
+| `GITHUB_WATCH_STATE` | watcher | override `artifacts/monitor/state.json` |
 | `DB_POOL_SIZE` | server | default 5 |
 | `PORT` / `HOST` | server | default 3000 / 0.0.0.0 |
 
@@ -928,3 +1052,13 @@ neon claim delete --yes
 - **Exact row counts.** Fine at demo scale; switch to estimates at 10M+ rows.
 - **Reports are JSON-first.** `--json` makes the same report usable in a PR
   comment, a dashboard, or a stored audit record.
+- **Polling over webhooks for the external watcher.** A localhost pipeline has no
+  public ingress, and a webhook would require a bot/App plus a callback URL.
+  Polling the public API keeps setup to one environment variable; the cost is the
+  rate limit, handled with a 120s default and an optional read-only token.
+- **The watcher never runs the watched repository's code.** It reads PR metadata
+  and applies *this* project's migrations to the branch. That keeps an external
+  repo from becoming a code-execution vector and makes fork PRs safe to handle.
+- **One Neon project for the lab, repository-scoped names.** Simple to operate
+  and enough to prove the pipeline. Multi-tenant isolation should use one project
+  per repository rather than a naming convention.

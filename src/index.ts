@@ -3,11 +3,26 @@ import { customers } from "./db/schema.ts";
 import { getDatabase } from "./db/client.ts";
 import { collectDatabaseStats } from "./db/stats.ts";
 import { dashboardHtml } from "./dashboard.ts";
+import {
+  resolveWatchConfig,
+  unconfiguredWatchStatus,
+  WatchService,
+} from "./github/service.ts";
 import { listBranches, type NeonBranch } from "./neon/branches.ts";
 import { buildBranchReport } from "./neon/report.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const hostname = process.env.HOST ?? "0.0.0.0";
+
+let watchConfig: ReturnType<typeof resolveWatchConfig> = null;
+try {
+  watchConfig = resolveWatchConfig();
+} catch (error) {
+  console.error(
+    `[watch] configuration error: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
+const watcher = watchConfig ? new WatchService(watchConfig) : null;
 
 /**
  * `/api/branches` and `/api/previews` both need the Neon branch list. A short
@@ -38,8 +53,9 @@ const server = Bun.serve({
   hostname,
   development: process.env.NODE_ENV !== "production",
   // Branch reports shell out to the Neon CLI and can take longer than Bun's
-  // 10s default. Keep the socket open while the report is assembled.
-  idleTimeout: 120,
+  // 10s default. A manual PR sync can create several branches, so allow the
+  // maximum idle window while the request is being served.
+  idleTimeout: 255,
 
   routes: {
     "/": () =>
@@ -144,6 +160,25 @@ const server = Bun.serve({
       });
     },
 
+    "/api/watch": () => json(watcher ? watcher.status() : unconfiguredWatchStatus()),
+
+    "/api/watch/sync": {
+      POST: async () => {
+        if (!watcher) {
+          return json(
+            {
+              error:
+                "No watched repository. Set GITHUB_REPO=owner/name in .env.local and restart the server.",
+            },
+            400,
+          );
+        }
+
+        const result = await watcher.syncNow("manual");
+        return json(result, result.error ? 500 : 200);
+      },
+    },
+
     "/api/branches/report": async (request) => {
       try {
         const name = new URL(request.url).searchParams.get("name");
@@ -177,3 +212,15 @@ const server = Bun.serve({
 });
 
 console.log(`Server listening on http://localhost:${server.port}`);
+
+if (watcher) {
+  void watcher.start().catch((error) => {
+    console.error(
+      `[watch] failed to start: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
+} else {
+  console.log(
+    "[watch] no GITHUB_REPO configured; set it in .env.local to auto-create preview branches.",
+  );
+}

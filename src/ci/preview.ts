@@ -63,6 +63,14 @@ export interface PreviewArtifacts {
   commentPath: string;
 }
 
+/** Optional origin metadata when a preview is created by the repo watcher. */
+export interface PreviewSource {
+  repo?: string;
+  title?: string;
+  url?: string;
+  author?: string;
+}
+
 export interface PreviewResult {
   pr: number;
   event: PreviewEvent;
@@ -77,6 +85,7 @@ export interface PreviewResult {
   report?: BranchReport;
   comment: string;
   artifacts?: PreviewArtifacts;
+  source?: PreviewSource;
   error?: string;
 }
 
@@ -96,6 +105,8 @@ export interface PreviewOptions {
   runTests?: boolean;
   /** Override the artifact directory. */
   artifactsDir?: string;
+  /** Origin metadata when the preview is created by the repository watcher. */
+  source?: PreviewSource;
   /** Injectable clock for tests. */
   now?: number;
 }
@@ -143,6 +154,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
     reason: plan.reason,
     steps,
     comment: "",
+    source: options.source,
   } satisfies Partial<PreviewResult> & Pick<PreviewResult, "pr" | "event" | "action" | "branch" | "parent" | "reason" | "steps">;
 
   if (plan.action === "skip") {
@@ -443,6 +455,8 @@ export function printPreviewResult(result: PreviewResult): void {
   console.log(bold(paint("cyan", "Database preview")));
   console.log("─".repeat(72));
   console.log(`PR         #${result.pr} (${result.event})`);
+  if (result.source?.repo) console.log(`Repo       ${result.source.repo}`);
+  if (result.source?.title) console.log(`Title      ${result.source.title}`);
   console.log(`Status     ${icon[result.status]} ${result.status.toUpperCase()}`);
   console.log(`Branch     ${bold(result.branch)} ${dim(`(parent ${result.parent})`)}`);
   if (result.expiresAt) console.log(`Expires    ${result.expiresAt}`);

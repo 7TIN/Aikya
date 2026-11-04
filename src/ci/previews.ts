@@ -59,6 +59,11 @@ export interface PreviewRecord {
   action: string | null;
   status: PreviewStatus;
   reason: string | null;
+  /** Origin repo when the preview came from the repository watcher. */
+  repo: string | null;
+  title: string | null;
+  url: string | null;
+  author: string | null;
   expiresAt: string | null;
   /** Artifact write time, used as "last run" in the dashboard. */
   updatedAt: string | null;
@@ -113,11 +118,12 @@ export function normalizePreviewStatus(value: unknown): PreviewStatus {
     : "unknown";
 }
 
-/** `preview/pr-42` → 42. Returns null for unrelated branch names. */
+/** `preview/pr-42` or `preview/7tin-gh-lab-pr-42` → 42. */
 export function previewNumberFromBranch(name: string): number | null {
-  const match = new RegExp(`^${previewBranchPrefix()}pr-(\\d+)$`).exec(
-    name.trim(),
-  );
+  const match = new RegExp(
+    `^${previewBranchPrefix()}(?:[a-z0-9._-]+-)?pr-(\\d+)$`,
+    "i",
+  ).exec(name.trim());
   return match?.[1] ? Number(match[1]) : null;
 }
 
@@ -171,6 +177,9 @@ export function normalizePreviewArtifact(
   const data = isRecord(raw) ? raw : {};
   const fromDir = /^pr-(\d+)$/.exec(options.dirName);
   const branchValue = asString(data.branch);
+  const source = isRecord(data.source)
+    ? data.source
+    : ({} as Record<string, unknown>);
   const pr =
     asInteger(data.pr) ??
     (fromDir?.[1] ? Number(fromDir[1]) : null) ??
@@ -187,6 +196,10 @@ export function normalizePreviewArtifact(
     action: asString(data.action),
     status: normalizePreviewStatus(data.status),
     reason: asString(data.reason),
+    repo: asString(source.repo),
+    title: asString(source.title),
+    url: asString(source.url),
+    author: asString(source.author),
     expiresAt: asString(data.expiresAt),
     updatedAt: options.updatedAt ?? null,
     artifactPath: options.artifactPath ?? null,
@@ -329,6 +342,10 @@ export function mergePreviews(
       action: null,
       status: "branch-only",
       reason: "preview branch exists but no local run artifact was found",
+      repo: null,
+      title: null,
+      url: null,
+      author: null,
       expiresAt: branch.expiresAt ?? null,
       updatedAt: null,
       artifactPath: null,

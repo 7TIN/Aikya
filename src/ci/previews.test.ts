@@ -37,6 +37,10 @@ function record(overrides: Partial<PreviewRecord> = {}): PreviewRecord {
     action: "create",
     status: "ready",
     reason: "create a fresh preview branch for the pull request",
+    repo: null,
+    title: null,
+    url: null,
+    author: null,
     expiresAt: "2026-11-10T10:00:00Z",
     updatedAt: "2026-11-03T10:00:00Z",
     artifactPath: "artifacts/preview/pr-7/report.json",
@@ -112,8 +116,33 @@ describe("preview artifacts", () => {
 
   test("extracts the PR number only from preview branches", () => {
     expect(previewNumberFromBranch("preview/pr-42")).toBe(42);
+    expect(previewNumberFromBranch("preview/7tin-gh-lab-pr-42")).toBe(42);
     expect(previewNumberFromBranch("preview/pr-42-hotfix")).toBeNull();
     expect(previewNumberFromBranch("main")).toBeNull();
+  });
+
+  test("keeps watcher origin metadata from the artifact", () => {
+    const parsed = normalizePreviewArtifact(
+      {
+        pr: 7,
+        branch: "preview/7tin-gh-lab-pr-7",
+        parent: "main",
+        status: "ready",
+        source: {
+          repo: "7TIN/gh-lab",
+          title: "Add widget",
+          url: "https://github.com/7TIN/gh-lab/pull/7",
+          author: "octocat",
+        },
+      },
+      { dirName: "7tin-gh-lab-pr-7" },
+    );
+
+    expect(parsed.pr).toBe(7);
+    expect(parsed.repo).toBe("7TIN/gh-lab");
+    expect(parsed.title).toBe("Add widget");
+    expect(parsed.url).toBe("https://github.com/7TIN/gh-lab/pull/7");
+    expect(parsed.author).toBe("octocat");
   });
 });
 

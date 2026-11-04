@@ -53,6 +53,11 @@ function schemaLines(result: PreviewResult): string[] {
   return lines;
 }
 
+/** Escape characters that would break a GitHub markdown table cell. */
+function mdCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
 function statusDetails(result: PreviewResult): string[] {
   const lines: string[] = [];
 
@@ -76,6 +81,20 @@ function statusDetails(result: PreviewResult): string[] {
     `| Parent | \`${result.parent}\` |`,
     `| Event | \`${result.event}\` |`,
   );
+
+  if (result.source?.repo) {
+    lines.push(`| Repository | \`${mdCell(result.source.repo)}\` |`);
+  }
+  if (result.source?.title) {
+    const title = mdCell(result.source.title);
+    const link = result.source.url
+      ? `[#${result.pr} ${title}](${result.source.url})`
+      : `#${result.pr} ${title}`;
+    lines.push(`| Pull request | ${link} |`);
+    if (result.source.author) {
+      lines.push(`| Author | @${mdCell(result.source.author)} |`);
+    }
+  }
 
   if (result.expiresAt) {
     lines.push(`| Expires | \`${result.expiresAt}\` |`);

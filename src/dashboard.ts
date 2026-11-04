@@ -86,10 +86,22 @@ export const dashboardHtml = `<!doctype html>
 
   <section class="cards" id="cards"></section>
 
+  <h2>Watched repository <span id="watch-count" class="count"></span></h2>
+  <div class="panel" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px; flex-wrap: wrap">
+    <div id="watch-summary" class="sub">Checking watcher…</div>
+    <button id="watch-sync">Sync PRs now</button>
+  </div>
+  <div class="panel" style="margin-top: 12px">
+    <table>
+      <thead><tr><th>repo</th><th>PR</th><th>title</th><th>head</th><th>branch</th><th>preview</th><th>synced</th></tr></thead>
+      <tbody id="watch-prs"></tbody>
+    </table>
+  </div>
+
   <h2>Pull request previews <span id="previews-count" class="count"></span></h2>
   <div class="panel">
     <table>
-      <thead><tr><th>PR</th><th>event</th><th>status</th><th>branch</th><th>live</th><th>expires</th><th>Δ rows</th><th>Δ size</th><th>updated</th><th></th></tr></thead>
+      <thead><tr><th>PR</th><th>repo</th><th>event</th><th>status</th><th>branch</th><th>live</th><th>expires</th><th>Δ rows</th><th>Δ size</th><th>updated</th><th></th></tr></thead>
       <tbody id="previews"></tbody>
     </table>
   </div>
@@ -179,7 +191,7 @@ function renderPreviews(payload) {
       ? "No preview records. Neon branches are unavailable: " + payload.branchesError
       : "No preview runs yet. Run bun run ci:preview --pr <n> --event opened.";
     const tr = row(cell(message, "empty"));
-    tr.firstChild.colSpan = 10;
+    tr.firstChild.colSpan = 11;
     table.appendChild(tr);
     return;
   }
@@ -189,6 +201,9 @@ function renderPreviews(payload) {
     const strong = document.createElement("strong");
     strong.textContent = preview.pr ? "#" + preview.pr : "—";
     pr.appendChild(strong);
+
+    const repoCell = document.createElement("td");
+    repoCell.textContent = preview.repo || "local";
 
     const branch = document.createElement("td");
     const branchName = document.createElement("strong");
@@ -216,6 +231,7 @@ function renderPreviews(payload) {
 
     table.appendChild(row(
       pr,
+      repoCell,
       cell(preview.event || "—"),
       statusCell,
       branch,
@@ -231,6 +247,9 @@ function renderPreviews(payload) {
 function showPreview(preview) {
   const lines = [];
   lines.push("PR #" + (preview.pr || "?") + (preview.event ? " · " + preview.event : ""));
+  if (preview.repo) lines.push("repo:    " + preview.repo);
+  if (preview.title) lines.push("title:   " + preview.title);
+  if (preview.url) lines.push("url:     " + preview.url);
   lines.push("status:  " + preview.status + (preview.action ? " (" + preview.action + ")" : ""));
   lines.push("branch:  " + preview.branch + (preview.parent ? "  (parent " + preview.parent + ")" : ""));
   if (preview.live && preview.live.exists) {
@@ -272,6 +291,87 @@ function showPreview(preview) {
   detail.textContent = lines.join("\\n");
   detail.scrollIntoView({ block: "nearest" });
 }
+function renderWatch(payload) {
+  const summary = $("watch-summary");
+  const table = $("watch-prs");
+  const button = $("watch-sync");
+  table.replaceChildren();
+
+  if (!payload.configured) {
+    $("watch-count").textContent = "";
+    summary.textContent = payload.error
+      ? "Watcher unavailable: " + payload.error
+      : "Not configured. Add GITHUB_REPO=owner/name to .env.local and restart the server.";
+    button.disabled = true;
+    const tr = row(cell(payload.error ? payload.error : "Set GITHUB_REPO to watch a repository.", "empty"));
+    tr.firstChild.colSpan = 7;
+    table.appendChild(tr);
+    return;
+  }
+
+  button.disabled = Boolean(payload.syncing);
+  const interval = payload.pollMs ? Math.round(payload.pollMs / 1000) + "s" : "off";
+  const tracked = payload.pullRequests || [];
+  const active = tracked.filter((pr) => pr.status !== "deleted" && pr.status !== "absent").length;
+  $("watch-count").textContent = tracked.length === 0 ? "" : active + " active · " + tracked.length + " tracked";
+  summary.textContent = payload.repos.join(", ") +
+    " · auto-poll " + interval +
+    (payload.lastRunAt ? " · last sync " + formatDate(payload.lastRunAt) : " · not synced yet") +
+    (payload.syncing ? " · syncing…" : "");
+
+  if (payload.lastError) {
+    summary.append(" · ");
+    const error = document.createElement("span");
+    error.className = "error";
+    error.textContent = payload.lastError;
+    summary.appendChild(error);
+  }
+
+  if (tracked.length === 0) {
+    const tr = row(cell("No pull requests tracked yet. Open one on " + payload.repos.join(", ") + ", then sync.", "empty"));
+    tr.firstChild.colSpan = 7;
+    table.appendChild(tr);
+    return;
+  }
+
+  for (const pr of tracked) {
+    const number = document.createElement("td");
+    const strong = document.createElement("strong");
+    strong.textContent = "#" + pr.number;
+    number.appendChild(strong);
+    if (pr.draft) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "draft";
+      number.append(" ", tag);
+    }
+
+    const title = document.createElement("td");
+    if (pr.url) {
+      const link = document.createElement("a");
+      link.href = pr.url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = pr.title || "(no title)";
+      title.appendChild(link);
+    } else {
+      title.textContent = pr.title || "(no title)";
+    }
+
+    const statusCell = document.createElement("td");
+    statusCell.appendChild(statusTag(pr.status));
+
+    table.appendChild(row(
+      cell(pr.repo),
+      number,
+      title,
+      cell(pr.headSha ? pr.headSha.slice(0, 7) : "—"),
+      cell(pr.branch),
+      statusCell,
+      cell(formatDate(pr.syncedAt)),
+    ));
+  }
+}
 function cell(text, className) {
   const td = document.createElement("td");
   td.textContent = text;
@@ -307,11 +407,12 @@ async function getJson(path) {
 }
 
 async function load() {
-  const [health, stats, branches, previews] = await Promise.allSettled([
+  const [health, stats, branches, previews, watch] = await Promise.allSettled([
     getJson("/api/health"),
     getJson("/api/stats"),
     getJson("/api/branches"),
     getJson("/api/previews"),
+    getJson("/api/watch"),
   ]);
 
   if (health.status === "fulfilled") {
@@ -426,6 +527,12 @@ async function load() {
       branchesError: previews.reason.message,
     });
   }
+
+  if (watch.status === "fulfilled") {
+    renderWatch(watch.value);
+  } else {
+    renderWatch({ configured: false, error: watch.reason.message });
+  }
 }
 
 async function runReport(name, output, button) {
@@ -507,6 +614,23 @@ async function runReport(name, output, button) {
 }
 
 $("refresh").addEventListener("click", () => load());
+
+$("watch-sync").addEventListener("click", async () => {
+  const button = $("watch-sync");
+  button.disabled = true;
+  button.textContent = "Syncing…";
+  try {
+    const response = await fetch("/api/watch/sync", { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || (response.status + " " + response.statusText));
+    await load();
+  } catch (error) {
+    $("watch-summary").textContent = "Sync failed: " + error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Sync PRs now";
+  }
+});
 
 load();
 </script>

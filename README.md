@@ -2,7 +2,8 @@
 
 A Bun + TypeScript lab for **autonomous Postgres database branching** on
 [Neon](https://neon.com): copy-on-write branches, branch-local migrations,
-seeded data, and storage/schema reporting.
+seeded data, storage/schema reporting, and a local watcher that turns pull
+requests from an external repository into preview branches.
 
 > The full roadmap (PR previews, CI runs, staging, agent sandboxes, retention)
 > lives in [docs/database-branching.md](docs/database-branching.md).
@@ -74,6 +75,8 @@ can keep working independently.
 | `bun run branch:report --base-url U --branch-url U` | Compare any two databases |
 | `bun run ci:preview --pr <n> --event <event>` | Local PR preview: create/recreate → migrate → test → report |
 | `bun run ci:cleanup --pr <n>` | Delete a preview branch (closed event) |
+| `bun run watch --repo <owner/name>` | One pass over an external repo's open PRs → branches |
+| `bun run watch:loop --repo <owner/name>` | Poll an external repo continuously (default 120s) |
 
 `branch:demo` also accepts `--parent`, `--reuse`, `--cleanup`, and `--json`.
 
@@ -194,6 +197,58 @@ not use `pull_request_target`, which would run untrusted code with secrets.
 `db-preview-cleanup.yml` prunes `preview/` branches older than 7 days as a
 backstop.
 
+## Watching an external repository (local, no bot install)
+
+Aikya is the pipeline; the watched repository is only a source of pull-request
+events. The local watcher polls GitHub's public REST API, so nothing needs to be
+installed in the other repository and no GitHub App or bot account is required.
+
+```bash
+# .env.local
+GITHUB_REPO=7TIN/gh-lab
+GITHUB_POLL_MS=120000
+# GITHUB_TOKEN=...                       # optional: higher limit / private repos
+# GITHUB_REPOS=owner/one,owner/two
+
+bun run watch --repo 7TIN/gh-lab          # one reconciliation pass
+bun run watch:loop --repo 7TIN/gh-lab     # keep polling
+bun run dev                               # auto-starts when GITHUB_REPO is set
+```
+
+The dashboard adds a **Watched repository** panel with a **Sync PRs now** button
+(`POST /api/watch/sync`) and the tracked PRs. The server polls every
+`GITHUB_POLL_MS` and also syncs on startup unless `GITHUB_WATCH_ON_START=false`.
+
+```text
+open PR, unseen              → create preview/<owner>-<repo>-pr-<n>
+open PR, new head commit     → delete + recreate
+open PR, unchanged, ready    → skip (failed runs retry after 5 minutes)
+PR closed / merged           → delete the branch
+```
+
+Watched branches are namespaced because every watched repository shares one Neon
+project in this lab: `preview/7tin-gh-lab-pr-7`. The `preview/pr-<n>` names stay
+reserved for Aikya's own GitHub Actions preview. Artifacts land in
+`artifacts/preview/7tin-gh-lab-pr-<n>/`; watcher state is kept in
+`artifacts/monitor/state.json` (both git-ignored).
+
+Important boundaries:
+
+- The watcher only reads PR metadata. It never checks out or executes the
+  watched repository's code; migrations and tests come from this project. A fork
+  PR is therefore handled like any other PR here, while the GitHub Actions
+  wrapper still skips forks because it runs PR code.
+- One Neon project/database is shared by all watched repositories for now. Use
+  separate projects when this becomes a multi-tenant product.
+- Unauthenticated GitHub API access allows 60 requests/hour per IP, so the
+  default poll is 120s. Set a read-only `GITHUB_TOKEN` to poll faster or watch
+  private repositories.
+- Deletions are skipped when pagination is incomplete, and a failed fetch leaves
+  every branch untouched.
+
+API: `GET /api/watch` returns the watcher status and tracked PRs;
+`POST /api/watch/sync` runs a reconciliation immediately.
+
 ## Staging and QA environments (Phase 3)
 
 Two persistent branches mirror long-lived environments. They have no expiry and
@@ -251,6 +306,8 @@ so the branch comparison is always against its parent.
 | `GET /api/customers?limit=20&offset=0` | Paginated customers |
 | `GET /api/branches` | Neon branches + logical size + writes |
 | `GET /api/previews` | PR preview artifacts joined with live branches |
+| `GET /api/watch` | Watcher config, tracked PRs, last sync/error |
+| `POST /api/watch/sync` | Reconcile open PRs with preview branches now |
 | `GET /api/branches/report?name=<branch>` | Storage + schema report |
 | `POST /api/echo` | Echo request body |
 
@@ -284,11 +341,15 @@ src/
     previews.ts     Preview artifacts + live branch join for the dashboard
     comment.ts      Sticky PR comment renderer
     run.ts          Branch-scoped child commands + test parsing
+  github/
+    client.ts       Read-only GitHub REST polling + pagination
+    monitor.ts      PR state machine: create/recreate/delete/skip
+    service.ts      Poll timer, manual sync, watcher status
   env/
     environments.ts Persistent staging/qa allowlist
   lib/
     duration.ts     30s/30m/24h/7d parsing for TTLs
-  cli/              Operator scripts (includes smoke.ts)
+  cli/              Operator scripts (includes smoke.ts, watch.ts)
 .github/workflows/  PR preview + scheduled cleanup
 drizzle/            Baseline migrations
 docs/               Phase plan and runbook
@@ -296,6 +357,12 @@ docs/               Phase plan and runbook
 
 ## Notes
 
+- The lab shares **one Neon project** across all watched repositories. Branch
+  names are repository-scoped (`preview/<owner>-<repo>-pr-<n>`), which is enough
+  for a single-user test setup. Per-repository projects are the productization
+  step for multi-tenant use.
+- The watcher polls the GitHub API; there is no webhook server, GitHub App, or
+  bot comment. It only reads PR metadata and never runs the watched repo's code.
 - Keep `prepare: false` on the client: Neon's pooled endpoint is PgBouncer.
 - Use `DATABASE_URL_UNPOOLED` for migrations and bulk loads.
 - `pg_database_size()` and Neon `logical_size` include inherited COW pages. The

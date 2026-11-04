@@ -1,0 +1,237 @@
+import { parseRepos } from "./client.ts";
+import {
+  emptyMonitorState,
+  loadMonitorState,
+  saveMonitorState,
+  syncRepository,
+  type MonitorState,
+  type SyncSummary,
+  type TrackedPullRequest,
+} from "./monitor.ts";
+
+export interface WatchConfig {
+  repos: string[];
+  pollMs: number;
+  watchOnStart: boolean;
+  parent?: string;
+  runTests: boolean;
+  retryMs?: number;
+  statePath?: string;
+}
+
+export interface WatchPullRequest extends TrackedPullRequest {
+  repo: string;
+}
+
+export interface WatchStatus {
+  configured: boolean;
+  repos: string[];
+  pollMs: number;
+  autoPoll: boolean;
+  syncing: boolean;
+  lastRunAt: string | null;
+  lastError: string | null;
+  summaries: SyncSummary[];
+  pullRequests: WatchPullRequest[];
+}
+
+export interface SyncRunResult {
+  skipped: boolean;
+  summaries: SyncSummary[];
+  error?: string;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function parsePollMs(value: string | undefined): number {
+  if (!value) return 120_000;
+  const pollMs = Number(value);
+  if (!Number.isFinite(pollMs) || pollMs <= 0) {
+    throw new Error(
+      `Invalid GITHUB_POLL_MS "${value}". Use milliseconds, for example 120000.`,
+    );
+  }
+  // The unauthenticated REST limit is 60 requests/hour per IP. Anything under
+  // 15s is almost certainly a mistake; use a token and a lower value if needed.
+  return Math.max(pollMs, 15_000);
+}
+
+function parseRetryMs(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const retryMs = Number(value);
+  if (!Number.isFinite(retryMs) || retryMs < 0) {
+    throw new Error(
+      `Invalid GITHUB_WATCH_RETRY_MS "${value}". Use milliseconds, for example 300000.`,
+    );
+  }
+  return retryMs;
+}
+
+/**
+ * Resolve the watcher configuration. Returns null when no repo is configured,
+ * so the server can start without GitHub at all.
+ *
+ * GITHUB_REPO or GITHUB_REPOS (comma-separated), GITHUB_POLL_MS,
+ * GITHUB_WATCH_ON_START, GITHUB_WATCH_TESTS, GITHUB_TOKEN.
+ */
+export function resolveWatchConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): WatchConfig | null {
+  const repos = parseRepos(env.GITHUB_REPOS ?? env.GITHUB_REPO);
+  if (repos.length === 0) return null;
+
+  return {
+    repos,
+    pollMs: parsePollMs(env.GITHUB_POLL_MS),
+    watchOnStart: env.GITHUB_WATCH_ON_START !== "false",
+    parent: env.NEON_PARENT_BRANCH || env.GITHUB_WATCH_PARENT || undefined,
+    runTests: env.GITHUB_WATCH_TESTS !== "false",
+    retryMs: parseRetryMs(env.GITHUB_WATCH_RETRY_MS),
+    statePath: env.GITHUB_WATCH_STATE || undefined,
+  };
+}
+
+/**
+ * Polls one or more repositories and reconciles preview branches.
+ *
+ * A single instance is shared by the HTTP server (automatic polling plus the
+ * manual "Sync PRs now" button) and the CLI. A simple in-process lock prevents
+ * a manual sync from overlapping with a scheduled one.
+ */
+export class WatchService {
+  private state: MonitorState = emptyMonitorState();
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private syncing = false;
+  private lastRunAt: string | null = null;
+  private lastError: string | null = null;
+  private summaries: SyncSummary[] = [];
+  private initialized = false;
+
+  constructor(readonly config: WatchConfig) {}
+
+  async init(): Promise<void> {
+    if (this.initialized) return;
+    this.state = await loadMonitorState(this.config.statePath);
+    this.initialized = true;
+
+    for (const repo of this.config.repos) {
+      const lastSyncAt = this.state.repos[repo]?.lastSyncAt;
+      if (lastSyncAt && (!this.lastRunAt || lastSyncAt > this.lastRunAt)) {
+        this.lastRunAt = lastSyncAt;
+      }
+    }
+  }
+
+  async start(): Promise<void> {
+    await this.init();
+    if (this.config.watchOnStart) {
+      await this.syncNow("startup");
+    }
+    this.timer = setInterval(() => {
+      void this.syncNow("poll");
+    }, this.config.pollMs);
+    console.log(
+      `[watch] polling ${this.config.repos.join(", ")} every ${Math.round(this.config.pollMs / 1000)}s`,
+    );
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  async syncNow(reason = "manual"): Promise<SyncRunResult> {
+    if (this.syncing) {
+      return { skipped: true, summaries: this.summaries };
+    }
+
+    this.syncing = true;
+    try {
+      await this.init();
+      const summaries: SyncSummary[] = [];
+
+      for (const repo of this.config.repos) {
+        const summary = await syncRepository({
+          repo,
+          state: this.state,
+          parent: this.config.parent,
+          runTests: this.config.runTests,
+          retryMs: this.config.retryMs,
+          log: (line) => console.log(`[watch] ${repo} ${line}`),
+        });
+        summaries.push(summary);
+        // Persist after each repo so a crash or timeout does not lose progress.
+        await saveMonitorState(this.state, this.config.statePath);
+      }
+
+      this.summaries = summaries;
+      this.lastRunAt = new Date().toISOString();
+      this.lastError =
+        summaries
+          .filter((summary) => summary.error)
+          .map((summary) => `${summary.repo}: ${summary.error}`)
+          .join("; ") || null;
+
+      const detail = summaries
+        .map(
+          (summary) =>
+            `${summary.repo} +${summary.created} ~${summary.recreated} ` +
+            `-${summary.deleted} =${summary.unchanged} !${summary.failed}`,
+        )
+        .join(", ");
+      console.log(`[watch] ${reason}: ${detail || "no repositories"}`);
+
+      return { skipped: false, summaries };
+    } catch (error) {
+      this.lastError = errorMessage(error);
+      console.error(`[watch] ${reason} failed: ${this.lastError}`);
+      return { skipped: false, summaries: this.summaries, error: this.lastError };
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  status(): WatchStatus {
+    const pullRequests: WatchPullRequest[] = [];
+    for (const repo of this.config.repos) {
+      const repoState = this.state.repos[repo];
+      if (!repoState) continue;
+      for (const tracked of Object.values(repoState.pullRequests)) {
+        pullRequests.push({ repo, ...tracked });
+      }
+    }
+
+    pullRequests.sort((left, right) => {
+      if (left.repo !== right.repo) return left.repo.localeCompare(right.repo);
+      return right.number - left.number;
+    });
+
+    return {
+      configured: true,
+      repos: this.config.repos,
+      pollMs: this.config.pollMs,
+      autoPoll: this.timer !== null,
+      syncing: this.syncing,
+      lastRunAt: this.lastRunAt,
+      lastError: this.lastError,
+      summaries: this.summaries,
+      pullRequests,
+    };
+  }
+}
+
+export function unconfiguredWatchStatus(): WatchStatus {
+  return {
+    configured: false,
+    repos: [],
+    pollMs: 0,
+    autoPoll: false,
+    syncing: false,
+    lastRunAt: null,
+    lastError: null,
+    summaries: [],
+    pullRequests: [],
+  };
+}
