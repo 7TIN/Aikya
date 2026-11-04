@@ -193,6 +193,33 @@ export class WatchService {
     }
   }
 
+  /**
+   * A dashboard deletion removes the branch outside the reconciliation loop.
+   * Mark any tracked PR as `deleted` so the next poll recreates the branch
+   * instead of treating its stale `ready` state as up to date.
+   *
+   * Returns true when a tracked branch was affected.
+   */
+  async markBranchDeleted(branch: string): Promise<boolean> {
+    await this.init();
+    let changed = false;
+
+    for (const repoState of Object.values(this.state.repos)) {
+      for (const tracked of Object.values(repoState.pullRequests)) {
+        if (tracked.branch !== branch) continue;
+        if (tracked.status === "deleted" || tracked.status === "absent") continue;
+        tracked.status = "deleted";
+        tracked.error = null;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      await saveMonitorState(this.state, this.config.statePath);
+    }
+    return changed;
+  }
+
   status(): WatchStatus {
     const pullRequests: WatchPullRequest[] = [];
     for (const repo of this.config.repos) {

@@ -433,6 +433,7 @@ realistic 72k rows, then the PR's migrations run against that data. Pass
 | Watcher CLI | `src/cli/watch.ts` |
 | Watcher state | `artifacts/monitor/state.json` (git-ignored) |
 | Dashboard watcher panel + API | `src/dashboard.ts`, `GET /api/watch`, `POST /api/watch/sync` |
+| Dashboard branch deletion + protected-branch guard | `src/dashboard.ts`, `src/neon/delete.ts`, `DELETE /api/branches` |
 
 ### Local simulator
 
@@ -544,6 +545,15 @@ branch state and logical size, expiry, row/storage delta, and last run time.
 **Show run** prints the recorded steps, tests, report summary, and sticky
 comment; **Report** compares the branch with its parent on demand.
 
+The **Branches** table also has **Delete** and **Run report** actions; the **Pull
+request previews** table has **Delete** for any live preview branch. Delete asks
+for confirmation, calls `DELETE /api/branches?name=<branch>`, and refreshes the
+page. The server refuses default/primary/Neon-protected branches, `main`, the
+configured parent, and the persistent `staging`/`qa` environments; the dashboard
+disables those buttons and shows the reason on hover. If the branch belongs to an
+open watched PR, deletion marks its watcher record as `deleted`, so the next poll
+recreates the branch rather than leaving a stale `ready` state.
+
 Preview branches that exist in Neon but have no local artifact still appear,
 marked `branch-only`, so an orphaned branch is never hidden. The data comes from
 `GET /api/previews`, which reads `artifacts/preview/*/report.json` and tolerates
@@ -644,6 +654,7 @@ remaining end-to-end check.
 - [x] Deletions are skipped on partial pagination; failed fetches leave branches alone.
 - [x] Repository-scoped branch and artifact names keep one shared Neon project collision-free.
 - [x] Watcher status + manual sync API and dashboard button verified on localhost.
+- [x] Dashboard Delete button deletes non-protected branches via `DELETE /api/branches`; protected branches are refused server-side.
 - [x] Real GitHub API read verified for `7TIN/gh-lab`; a simulated PR created and deleted a real branch.
 - [ ] Open a real PR on `7TIN/gh-lab` and observe auto-detection end to end.
 - [ ] Give each watched repository its own Neon project for multi-tenant isolation.
@@ -663,6 +674,10 @@ remaining end-to-end check.
 - Always set `--expires-at` as a backstop even if PR cleanup fails.
 - Never use `pull_request_target` to run PR code.
 - Branch creation uses `--no-secrets`; the connection string is fetched per run.
+- Dashboard deletion is guarded on the server, not just in the UI: the DELETE
+  route re-reads the branch and refuses default, primary, protected, parent, and
+  environment branches. A watched branch deleted manually is marked `deleted` so
+  the next poll recreates it while its PR is open.
 - Free-plan projects allow 10 branches. The cleanup job and 7-day expiry keep
   previews from crowding out demo branches.
 
@@ -913,6 +928,9 @@ bun run db:stats --url "$SOME_CONNECTION_STRING" --json
 bun run branch:create --name demo-coupons --parent main
 bun run branch:report demo-coupons
 bun run branch:delete demo-coupons --yes
+
+# dashboard equivalent: non-protected branches only
+curl -X DELETE "http://localhost:3000/api/branches?name=demo-coupons"
 ```
 
 ### Run the full feature experiment
@@ -973,6 +991,7 @@ to treat every open PR as new (existing branches are replaced, not duplicated).
 | `GitHub repository ... was not found` | typo, private repo, or no `GITHUB_TOKEN` | check `owner/name`; add a token for private repos |
 | Watched branch has a repo prefix | expected on the shared project | use `preview/<owner>-<repo>-pr-<n>`, not `preview/pr-<n>` |
 | No PRs appear in the watcher panel | `GITHUB_REPO` unset, or the repo has no open PRs | set it in `.env.local`, restart, then press **Sync PRs now** |
+| Dashboard **Delete** is disabled or returns 409 | branch is default/primary/protected, the parent, `staging`, or `qa` | use `bun run branch:delete <branch> --yes` only if the deletion is intentional |
 
 ### Delete the lab project
 

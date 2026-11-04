@@ -67,6 +67,10 @@ export const dashboardHtml = `<!doctype html>
     padding: 5px 10px; border-radius: 8px; cursor: pointer; font-size: 12px;
   }
   button:hover { border-color: #3a465e; background: #202938; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.danger { border-color: #7f2a2a; color: #fca5a5; }
+  button.danger:hover:not(:disabled) { background: #2a1111; border-color: #b91c1c; }
+  .actions { display: inline-flex; gap: 6px; }
   pre {
     margin: 0; padding: 16px; background: #0a0c11; border-top: 1px solid var(--border);
     overflow: auto; font-size: 12px; line-height: 1.55; color: #cbd5e1; max-height: 520px;
@@ -227,6 +231,13 @@ function renderPreviews(payload) {
       reportButton.style.marginLeft = "6px";
       reportButton.addEventListener("click", () => runReport(preview.branch, $("report"), reportButton));
       action.appendChild(reportButton);
+
+      const deleteButton = document.createElement("button");
+      deleteButton.textContent = "Delete";
+      deleteButton.className = "danger";
+      deleteButton.style.marginLeft = "6px";
+      deleteButton.addEventListener("click", () => deleteBranch(preview.branch, deleteButton, $("preview-detail")));
+      action.appendChild(deleteButton);
     }
 
     table.appendChild(row(
@@ -399,6 +410,32 @@ function card(label, value, hint) {
   }
   return div;
 }
+async function deleteBranch(name, button, output) {
+  const confirmed = window.confirm(
+    'Delete branch "' + name + '"?\\n\\nThis removes it from Neon and cannot be undone.'
+  );
+  if (!confirmed) return;
+
+  button.disabled = true;
+  output.textContent = "Deleting branch " + name + "…";
+  try {
+    const response = await fetch("/api/branches?name=" + encodeURIComponent(name), { method: "DELETE" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || (response.status + " " + response.statusText));
+
+    output.textContent = "Deleted branch " + name + "." +
+      (body.warning ? "\\n" + body.warning : "") +
+      (body.watched
+        ? "\\nThis branch belongs to an open watched PR, so the watcher will recreate it on the next sync."
+        : "");
+    await load();
+  } catch (error) {
+    output.textContent = "Delete failed: " + error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function getJson(path) {
   const response = await fetch(path);
   const body = await response.json().catch(() => ({}));
@@ -488,10 +525,25 @@ async function load() {
       state.appendChild(tag);
 
       const action = document.createElement("td");
-      const button = document.createElement("button");
-      button.textContent = "Run report";
-      button.addEventListener("click", () => runReport(branch.name, info, button));
-      action.appendChild(button);
+      const actions = document.createElement("div");
+      actions.className = "actions";
+
+      const reportButton = document.createElement("button");
+      reportButton.textContent = "Run report";
+      reportButton.addEventListener("click", () => runReport(branch.name, info, reportButton));
+
+      const deleteButton = document.createElement("button");
+      deleteButton.textContent = "Delete";
+      deleteButton.className = "danger";
+      if (branch.deletable === false) {
+        deleteButton.disabled = true;
+        deleteButton.title = "Protected: " + (branch.deleteBlockedReason || "not deletable from the dashboard");
+      } else {
+        deleteButton.addEventListener("click", () => deleteBranch(branch.name, deleteButton, info));
+      }
+
+      actions.append(reportButton, deleteButton);
+      action.appendChild(actions);
 
       const parent = branch.parentId ? byId.get(branch.parentId) : undefined;
       const delta =

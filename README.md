@@ -183,6 +183,14 @@ live Neon state and logical size, expiry, row/storage delta, and the recorded
 steps, tests, and sticky comment. Preview branches found in Neon without a local
 artifact are listed as `branch-only`.
 
+The **Branches** table has a **Delete** button for ad-hoc and preview branches.
+The **Pull request previews** table also offers **Delete** for any live preview
+branch. Both ask for confirmation, delete the branch on Neon, and refresh the
+page. The server refuses the default, primary, or Neon-protected branch, the
+configured parent, `main`, `staging`, and `qa`; protected buttons are disabled.
+Deleting a branch that belongs to an open watched PR marks the watcher state so
+the next sync recreates it.
+
 ```text
 opened/reopened  → create (or replace) → migrate → test → report → comment
 synchronize      → delete + recreate  → migrate → test → report → comment
@@ -308,6 +316,7 @@ so the branch comparison is always against its parent.
 | `GET /api/stats` | Size + row counts per table |
 | `GET /api/customers?limit=20&offset=0` | Paginated customers |
 | `GET /api/branches` | Neon branches + logical size + writes |
+| `DELETE /api/branches?name=<branch>` | Delete a non-protected branch (dashboard button) |
 | `GET /api/previews` | PR preview artifacts joined with live branches |
 | `GET /api/watch` | Watcher config, tracked PRs, last sync/error |
 | `POST /api/watch/sync` | Reconcile open PRs with preview branches now |
@@ -338,6 +347,7 @@ src/
     verify.ts       No-write COW verification
     prune.ts        Retention candidate selection
     reset.ts        Pre-report → reset → migrate → smoke
+    delete.ts       Protected-branch guard for dashboard deletion
   ci/
     events.ts       Event parsing, PR validation, branch naming
     preview.ts      Create/recreate/delete/skip orchestration

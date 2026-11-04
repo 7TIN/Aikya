@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { resolveWatchConfig, unconfiguredWatchStatus } from "./service.ts";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resolveWatchConfig, unconfiguredWatchStatus, WatchService } from "./service.ts";
 
 describe("resolveWatchConfig", () => {
   test("returns null when no repository is configured", () => {
@@ -96,5 +99,70 @@ describe("unconfiguredWatchStatus", () => {
       summaries: [],
       pullRequests: [],
     });
+  });
+});
+
+describe("WatchService", () => {
+  test("marks a manually deleted branch so the next poll recreates it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "aikya-watch-"));
+    const statePath = join(dir, "state.json");
+
+    try {
+      await writeFile(
+        statePath,
+        JSON.stringify({
+          version: 1,
+          repos: {
+            "7TIN/gh-lab": {
+              lastSyncAt: null,
+              lastError: null,
+              pullRequests: {
+                "7": {
+                  number: 7,
+                  title: "Add widget",
+                  author: "octocat",
+                  url: "https://github.com/7TIN/gh-lab/pull/7",
+                  draft: false,
+                  headSha: "abc1234",
+                  branch: "preview/7tin-gh-lab-pr-7",
+                  status: "ready",
+                  event: "opened",
+                  syncedAt: "2026-11-04T10:00:00Z",
+                  lastAttemptAt: "2026-11-04T10:00:00Z",
+                  error: null,
+                },
+              },
+            },
+          },
+        }),
+        "utf8",
+      );
+
+      const service = new WatchService({
+        repos: ["7TIN/gh-lab"],
+        pollMs: 120_000,
+        watchOnStart: false,
+        runTests: false,
+        statePath,
+      });
+
+      expect(
+        await service.markBranchDeleted("preview/7tin-gh-lab-pr-7"),
+      ).toBe(true);
+      expect(service.status().pullRequests[0]?.status).toBe("deleted");
+
+      const saved = JSON.parse(await readFile(statePath, "utf8")) as {
+        repos: Record<string, { pullRequests: Record<string, { status: string }> }>;
+      };
+      expect(
+        saved.repos["7TIN/gh-lab"]?.pullRequests["7"]?.status,
+      ).toBe("deleted");
+
+      expect(
+        await service.markBranchDeleted("preview/7tin-gh-lab-pr-99"),
+      ).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

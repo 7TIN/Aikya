@@ -8,7 +8,8 @@ import {
   unconfiguredWatchStatus,
   WatchService,
 } from "./github/service.ts";
-import { listBranches, type NeonBranch } from "./neon/branches.ts";
+import { deleteBranch, listBranches, type NeonBranch } from "./neon/branches.ts";
+import { branchDeleteBlockedReason } from "./neon/delete.ts";
 import { buildBranchReport } from "./neon/report.ts";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -121,20 +122,82 @@ const server = Bun.serve({
       }
     },
 
-    "/api/branches": async () => {
-      try {
-        const branches = await cachedBranches();
-        return json({ branches });
-      } catch (error) {
-        return json(
-          {
-            branches: [],
-            error: errorMessage(error),
-            hint: "Set NEON_PROJECT_ID and make sure the Neon CLI is authenticated (or NEON_API_KEY is set).",
-          },
-          503,
-        );
-      }
+    "/api/branches": {
+      GET: async () => {
+        try {
+          const branches = (await cachedBranches()).map((branch) => {
+            const blocked = branchDeleteBlockedReason(branch);
+            return {
+              ...branch,
+              deletable: blocked === null,
+              deleteBlockedReason: blocked,
+            };
+          });
+          return json({ branches });
+        } catch (error) {
+          return json(
+            {
+              branches: [],
+              error: errorMessage(error),
+              hint: "Set NEON_PROJECT_ID and make sure the Neon CLI is authenticated (or NEON_API_KEY is set).",
+            },
+            503,
+          );
+        }
+      },
+
+      DELETE: async (request) => {
+        const name = new URL(request.url).searchParams.get("name")?.trim();
+        if (!name) {
+          return json({ error: "Missing ?name=<branch>" }, 400);
+        }
+
+        try {
+          // Read the branch fresh: the cached list may predate a protection
+          // change, and this guard is the last line of defense before deletion.
+          const branch = (await listBranches()).find((entry) => entry.name === name);
+          if (!branch) {
+            return json({ error: `Branch "${name}" was not found.` }, 404);
+          }
+
+          const blocked = branchDeleteBlockedReason(branch);
+          if (blocked) {
+            return json(
+              {
+                error: `Refusing to delete "${name}": it is ${blocked}. Use the CLI with an explicit --yes if this is intentional.`,
+              },
+              409,
+            );
+          }
+
+          await deleteBranch(name);
+          branchCache = null;
+
+          // If the branch belongs to an open watched PR, mark it deleted so the
+          // watcher recreates it on the next poll instead of skipping a stale
+          // "ready" record. A state-write failure must not turn a successful
+          // deletion into an error response.
+          let watched = false;
+          let warning;
+          if (watcher) {
+            try {
+              watched = await watcher.markBranchDeleted(name);
+            } catch (error) {
+              warning = `Branch deleted, but watcher state could not be updated: ${errorMessage(error)}`;
+              console.warn(`[watch] ${warning}`);
+            }
+          }
+
+          return json({
+            deleted: true,
+            branch: name,
+            watched,
+            ...(warning ? { warning } : {}),
+          });
+        } catch (error) {
+          return json({ error: errorMessage(error) }, 500);
+        }
+      },
     },
 
     "/api/previews": async () => {
