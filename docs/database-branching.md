@@ -618,6 +618,9 @@ project rather than relying on the prefix.
 - Each branch keeps a 7-day expiry even if the local watcher is offline.
 - Branch names are capped at 63 characters with the `-pr-<n>` suffix preserved,
   so long repository names cannot collide.
+- Run only one watcher per state file. The overlap lock is in-process, so the
+  server watcher and `watch:loop` writing the same `artifacts/monitor/state.json`
+  can race on the same branches.
 
 **Verified locally:** the public API returned `0` open PRs for `7TIN/gh-lab`,
 and a simulated open → closed cycle created and deleted the real branch

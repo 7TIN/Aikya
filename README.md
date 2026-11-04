@@ -245,6 +245,9 @@ Important boundaries:
   private repositories.
 - Deletions are skipped when pagination is incomplete, and a failed fetch leaves
   every branch untouched.
+- Run one watcher per state file: either the server's watcher or
+  `watch:loop`, not both. The overlap lock is in-process, so two processes
+  sharing `artifacts/monitor/state.json` could race on the same branches.
 
 API: `GET /api/watch` returns the watcher status and tracked PRs;
 `POST /api/watch/sync` runs a reconciliation immediately.
