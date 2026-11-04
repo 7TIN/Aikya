@@ -175,6 +175,11 @@ Artifacts land in `artifacts/preview/pr-123/` (`report.json`, `comment.md`).
 Use `--reset` to drop/migrate/seed instead of inheriting, `--fork` to simulate a
 fork PR, `--expires-in 7d` to change retention, and `--json` for automation.
 
+`bun run dev` shows every PR preview on the dashboard: event, run status, branch,
+live Neon state and logical size, expiry, row/storage delta, and the recorded
+steps, tests, and sticky comment. Preview branches found in Neon without a local
+artifact are listed as `branch-only`.
+
 ```text
 opened/reopened  → create (or replace) → migrate → test → report → comment
 synchronize      → delete + recreate  → migrate → test → report → comment
@@ -232,19 +237,20 @@ Safety rules: the environment allowlist rejects `main` and arbitrary branches;
 replacing an existing environment requires `--yes`; default/primary/protected
 branches are refused; and `branch:prune` never selects `staging` or `qa`.
 
-The dashboard's top cards and table list use `DATABASE_URL` (main). Branch
-cards and **Run report** open separate connections, so the branch comparison is
-always against its parent.
+The dashboard's top cards and table list use `DATABASE_URL` (main). Branches and
+PR previews come from the Neon CLI; **Run report** opens separate connections,
+so the branch comparison is always against its parent.
 
 ## API
 
 | Route | Description |
 | --- | --- |
-| `GET /` | Dashboard: health, tables, branches, report runner |
+| `GET /` | Dashboard: health, tables, PR previews, branches, report runner |
 | `GET /api/health` | DB connectivity, database name, latency |
 | `GET /api/stats` | Size + row counts per table |
 | `GET /api/customers?limit=20&offset=0` | Paginated customers |
 | `GET /api/branches` | Neon branches + logical size + writes |
+| `GET /api/previews` | PR preview artifacts joined with live branches |
 | `GET /api/branches/report?name=<branch>` | Storage + schema report |
 | `POST /api/echo` | Echo request body |
 
@@ -275,6 +281,7 @@ src/
   ci/
     events.ts       Event parsing, PR validation, branch naming
     preview.ts      Create/recreate/delete/skip orchestration
+    previews.ts     Preview artifacts + live branch join for the dashboard
     comment.ts      Sticky PR comment renderer
     run.ts          Branch-scoped child commands + test parsing
   env/

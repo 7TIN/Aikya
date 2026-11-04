@@ -525,6 +525,20 @@ A separate bot account or organization-owned repo is preferable to maintaining
 a second personal account. The pipeline never needs the account credentials
 themselves — only the two repository settings above.
 
+### Local dashboard
+
+`bun run dev` (http://localhost:3000) reads the preview artifacts and joins them
+with the live Neon branch list. The **Pull request previews** table shows, per
+PR: the event, run status, branch name, live branch state and logical size,
+expiry, row/storage delta, and last run time. **Show run** prints the recorded
+steps, tests, report summary, and sticky comment; **Report** compares the branch
+with its parent on demand.
+
+Preview branches that exist in Neon but have no local artifact still appear,
+marked `branch-only`, so an orphaned branch is never hidden. The data comes from
+`GET /api/previews`, which reads `artifacts/preview/*/report.json` and tolerates
+a missing artifact directory or an unreachable Neon CLI.
+
 ### Phase 2 done criteria
 
 - [x] Deterministic name `preview/pr-<number>` with sanitization and validation.

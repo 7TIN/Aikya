@@ -56,6 +56,10 @@ export const dashboardHtml = `<!doctype html>
   .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); color: var(--muted); }
   .tag.default { color: var(--accent); border-color: #1f6f57; background: #0d2a22; }
   .tag.ready { color: var(--accent); border-color: #1f6f57; background: #0d2a22; }
+  .tag.skipped, .tag.absent, .tag.branch-only { color: var(--warn); border-color: #6b5518; background: #2a230d; }
+  .tag.failed { color: var(--bad); border-color: #7f2a2a; background: #2a1111; }
+  .tag.deleted, .tag.unknown { color: var(--muted); }
+  .count { color: var(--muted); font-size: 12px; font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: 6px; }
   .error { color: var(--bad); }
   .empty { padding: 18px; color: var(--muted); font-size: 13px; }
   button {
@@ -77,10 +81,19 @@ export const dashboardHtml = `<!doctype html>
       <h1>db-branch</h1>
       <p class="sub">Neon copy-on-write branching lab · Bun + TypeScript + Drizzle</p>
     </div>
-    <div class="pill"><span id="status-dot" class="dot"></span><span id="status-text">connecting…</span></div>
+    <div class="pill"><span id="status-dot" class="dot"></span><span id="status-text">connecting…</span><button id="refresh">Refresh</button></div>
   </header>
 
   <section class="cards" id="cards"></section>
+
+  <h2>Pull request previews <span id="previews-count" class="count"></span></h2>
+  <div class="panel">
+    <table>
+      <thead><tr><th>PR</th><th>event</th><th>status</th><th>branch</th><th>live</th><th>expires</th><th>Δ rows</th><th>Δ size</th><th>updated</th><th></th></tr></thead>
+      <tbody id="previews"></tbody>
+    </table>
+  </div>
+  <div class="panel" style="margin-top: 12px"><pre id="preview-detail">Run bun run ci:preview --pr &lt;n&gt; --event opened, then refresh to see the run, its branch, and its sticky comment.</pre></div>
 
   <h2>Tables on this branch</h2>
   <div class="panel">
@@ -126,6 +139,139 @@ function formatDate(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? String(value) : date.toISOString().slice(0, 19).replace("T", " ");
 }
+function formatSigned(value) {
+  const number = Number(value || 0);
+  return (number > 0 ? "+" : "") + formatNumber(number);
+}
+function statusTag(status) {
+  const span = document.createElement("span");
+  span.className = "tag " + status;
+  span.textContent = status;
+  return span;
+}
+function liveCell(preview, liveAvailable) {
+  const td = document.createElement("td");
+  if (!liveAvailable) {
+    td.textContent = "n/a";
+    return td;
+  }
+  if (!preview.live || !preview.live.exists) {
+    td.appendChild(statusTag("absent"));
+    return td;
+  }
+  td.appendChild(statusTag(preview.live.state === "ready" ? "ready" : "provisioning"));
+  if (preview.live.logicalSize) {
+    td.append(" " + formatBytes(preview.live.logicalSize));
+  }
+  return td;
+}
+function renderPreviews(payload) {
+  const table = $("previews");
+  table.replaceChildren();
+
+  const previews = payload.previews || [];
+  $("previews-count").textContent = previews.length === 0
+    ? ""
+    : previews.length + " recorded · " + (payload.active || 0) + " live";
+
+  if (previews.length === 0) {
+    const message = payload.branchesError
+      ? "No preview records. Neon branches are unavailable: " + payload.branchesError
+      : "No preview runs yet. Run bun run ci:preview --pr <n> --event opened.";
+    const tr = row(cell(message, "empty"));
+    tr.firstChild.colSpan = 10;
+    table.appendChild(tr);
+    return;
+  }
+
+  for (const preview of previews) {
+    const pr = document.createElement("td");
+    const strong = document.createElement("strong");
+    strong.textContent = preview.pr ? "#" + preview.pr : "—";
+    pr.appendChild(strong);
+
+    const branch = document.createElement("td");
+    const branchName = document.createElement("strong");
+    branchName.textContent = preview.branch;
+    branch.appendChild(branchName);
+
+    const report = preview.report;
+
+    const statusCell = document.createElement("td");
+    statusCell.appendChild(statusTag(preview.status));
+
+    const action = document.createElement("td");
+    const show = document.createElement("button");
+    show.textContent = "Show run";
+    show.addEventListener("click", () => showPreview(preview));
+    action.appendChild(show);
+
+    if (preview.live && preview.live.exists) {
+      const reportButton = document.createElement("button");
+      reportButton.textContent = "Report";
+      reportButton.style.marginLeft = "6px";
+      reportButton.addEventListener("click", () => runReport(preview.branch, $("report"), reportButton));
+      action.appendChild(reportButton);
+    }
+
+    table.appendChild(row(
+      pr,
+      cell(preview.event || "—"),
+      statusCell,
+      branch,
+      liveCell(preview, payload.liveAvailable !== false),
+      cell(formatDate(preview.expiresAt || (preview.live && preview.live.expiresAt))),
+      cell(report ? formatSigned(report.rowDelta) : "n/a", "num"),
+      cell(report ? formatBytesDelta(report.sizeDeltaBytes) : "n/a", "num"),
+      cell(formatDate(preview.updatedAt)),
+      action,
+    ));
+  }
+}
+function showPreview(preview) {
+  const lines = [];
+  lines.push("PR #" + (preview.pr || "?") + (preview.event ? " · " + preview.event : ""));
+  lines.push("status:  " + preview.status + (preview.action ? " (" + preview.action + ")" : ""));
+  lines.push("branch:  " + preview.branch + (preview.parent ? "  (parent " + preview.parent + ")" : ""));
+  if (preview.live && preview.live.exists) {
+    lines.push("live:    " + preview.live.state +
+      (preview.live.logicalSize ? " · " + formatBytes(preview.live.logicalSize) : ""));
+  } else {
+    lines.push("live:    absent");
+  }
+  lines.push("expires: " + formatDate(preview.expiresAt || (preview.live && preview.live.expiresAt)));
+  if (preview.updatedAt) lines.push("updated: " + formatDate(preview.updatedAt));
+  if (preview.reason) lines.push("reason:  " + preview.reason);
+
+  if (preview.steps && preview.steps.length > 0) {
+    lines.push("", "steps");
+    for (const step of preview.steps) {
+      const mark = step.status === "ok" ? "✔" : step.status === "failed" ? "✖" : "·";
+      lines.push("  " + mark + " " + step.name + (step.detail ? " — " + step.detail : ""));
+    }
+  }
+
+  if (preview.tests && preview.tests.ran) {
+    lines.push("", "tests: " + (preview.tests.passed ?? 0) + " passed / " +
+      (preview.tests.failed ?? 0) + " failed (exit " + (preview.tests.exitCode ?? "?") + ")");
+  }
+
+  if (preview.report) {
+    const report = preview.report;
+    lines.push("", "branch delta");
+    lines.push("  rows:   " + formatNumber(report.rowsBase) + " → " + formatNumber(report.rowsBranch) +
+      " (" + formatSigned(report.rowDelta) + ")");
+    lines.push("  size:   " + formatBytesDelta(report.sizeDeltaBytes) + " (new pages)");
+    lines.push("  schema: " + (report.schemaChanged ? "changes detected" : "no changes"));
+  }
+
+  if (preview.error) lines.push("", "error: " + preview.error);
+  if (preview.comment) lines.push("", "sticky comment", preview.comment.trim());
+
+  const detail = $("preview-detail");
+  detail.textContent = lines.join("\\n");
+  detail.scrollIntoView({ block: "nearest" });
+}
 function cell(text, className) {
   const td = document.createElement("td");
   td.textContent = text;
@@ -161,10 +307,11 @@ async function getJson(path) {
 }
 
 async function load() {
-  const [health, stats, branches] = await Promise.allSettled([
+  const [health, stats, branches, previews] = await Promise.allSettled([
     getJson("/api/health"),
     getJson("/api/stats"),
     getJson("/api/branches"),
+    getJson("/api/previews"),
   ]);
 
   if (health.status === "fulfilled") {
@@ -181,6 +328,11 @@ async function load() {
       card("Database size", formatBytes(s.sizeBytes), s.database),
       card("Rows", formatNumber(s.totalRows), s.tables.length + " tables"),
       card("Branches", branches.status === "fulfilled" ? String(branches.value.branches.length) : "n/a", "Neon project"),
+      card(
+        "Previews",
+        previews.status === "fulfilled" ? String(previews.value.active || 0) : "n/a",
+        previews.status === "fulfilled" ? (previews.value.total || 0) + " recorded" : "artifacts unavailable",
+      ),
       card("Server", "Bun", s.serverVersion.split(" ").slice(0, 2).join(" ")),
     );
 
@@ -221,6 +373,12 @@ async function load() {
         tag.textContent = "default";
         name.append(" ", tag);
       }
+      if (branch.name.indexOf("preview/") === 0) {
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = "preview";
+        name.append(" ", tag);
+      }
 
       const state = document.createElement("td");
       const tag = document.createElement("span");
@@ -256,6 +414,17 @@ async function load() {
     const tr = row(cell(branches.reason.message, "empty error"));
     tr.firstChild.colSpan = 7;
     table.appendChild(tr);
+  }
+
+  if (previews.status === "fulfilled") {
+    renderPreviews(previews.value);
+  } else {
+    renderPreviews({
+      previews: [],
+      total: 0,
+      active: 0,
+      branchesError: previews.reason.message,
+    });
   }
 }
 
@@ -336,6 +505,8 @@ async function runReport(name, output, button) {
     button.disabled = false;
   }
 }
+
+$("refresh").addEventListener("click", () => load());
 
 load();
 </script>

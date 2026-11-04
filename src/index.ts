@@ -1,12 +1,29 @@
+import { loadPreviewArtifacts, mergePreviews } from "./ci/previews.ts";
 import { customers } from "./db/schema.ts";
 import { getDatabase } from "./db/client.ts";
 import { collectDatabaseStats } from "./db/stats.ts";
 import { dashboardHtml } from "./dashboard.ts";
-import { listBranches } from "./neon/branches.ts";
+import { listBranches, type NeonBranch } from "./neon/branches.ts";
 import { buildBranchReport } from "./neon/report.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const hostname = process.env.HOST ?? "0.0.0.0";
+
+/**
+ * `/api/branches` and `/api/previews` both need the Neon branch list. A short
+ * cache keeps a dashboard refresh from shelling out to the Neon CLI twice.
+ */
+let branchCache: { at: number; value: NeonBranch[] } | null = null;
+const BRANCH_CACHE_MS = 3_000;
+
+async function cachedBranches(): Promise<NeonBranch[]> {
+  if (branchCache && Date.now() - branchCache.at < BRANCH_CACHE_MS) {
+    return branchCache.value;
+  }
+  const value = await listBranches();
+  branchCache = { at: Date.now(), value };
+  return value;
+}
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status });
@@ -90,7 +107,7 @@ const server = Bun.serve({
 
     "/api/branches": async () => {
       try {
-        const branches = await listBranches();
+        const branches = await cachedBranches();
         return json({ branches });
       } catch (error) {
         return json(
@@ -102,6 +119,29 @@ const server = Bun.serve({
           503,
         );
       }
+    },
+
+    "/api/previews": async () => {
+      // Artifacts are read first: they still explain the last run when Neon is
+      // unreachable. The live branch list is best-effort.
+      const records = await loadPreviewArtifacts();
+      let branches: NeonBranch[] | null = null;
+      let branchesError: string | undefined;
+
+      try {
+        branches = await cachedBranches();
+      } catch (error) {
+        branchesError = errorMessage(error);
+      }
+
+      const previews = mergePreviews(records, branches);
+      return json({
+        liveAvailable: branches !== null,
+        total: previews.length,
+        active: previews.filter((preview) => preview.live.exists).length,
+        previews,
+        ...(branchesError ? { branchesError } : {}),
+      });
     },
 
     "/api/branches/report": async (request) => {
