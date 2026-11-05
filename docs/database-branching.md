@@ -161,6 +161,296 @@ this lab (now claimed). The wrapper in `src/neon/cli.ts` is the seam to replace 
 | 4 | Per-agent sandboxes with TTL, quotas, and guardrails | Planned |
 | 5 | Metrics, cost visibility, retention jobs, dashboards | Planned |
 
+> **Active execution plan:** workstreams W0–W4 below. The numbered phases stay
+> as the product-level view; the workstreams are the build order. W0 is
+> implemented, W1–W4 are specified but not built.
+
+---
+
+## Preview pipeline plan — workstreams and tiers
+
+### Why this plan exists
+
+The current preview branch is created in Aikya's shared Neon project and
+migrated with **Aikya's** schema. It proves the branching mechanism works, but
+it does not prove anything about the watched repository's migrations. A real
+preview must answer one question:
+
+> Does this pull request's code, schema, and configuration work against a
+> database that looks like the one it will ship to?
+
+Answering that requires four separations:
+
+| Concern | Owner | Not the owner |
+| --- | --- | --- |
+| Schema and migrations | the watched repository | Aikya |
+| Database branch | the watched repository's Neon project | Aikya's project |
+| Code execution | an ephemeral sandbox | the orchestrator host |
+| Credentials | the control plane | the sandbox or the PR |
+
+### Ordering rule
+
+1. **Describe before execute.** Resolve a contract before running anything.
+2. **Isolate before running untrusted code.** The sandbox lands before the
+   repo's migrations are executed.
+3. **Own the subject's database before calling it a preview.** A branch in the
+   wrong project is a demo, not a preview.
+4. **Add agents after deterministic gates.** The agent advises; tests gate.
+5. **Observe and retain before quotas.** You cannot enforce limits you cannot
+   measure.
+
+This is why W1 (sandbox) precedes W2 (subject-owned database), even though W2
+is the feature people care about: W2 has to execute the repository's migration
+command, and that must never run on the orchestrator host.
+
+---
+
+### Tier model — configuration discovery
+
+Every preview resolves its contract through three tiers, in order.
+
+#### Tier 1 — explicit manifest (preferred)
+
+The repository commits a contract describing how to install, migrate, seed,
+build, test, and run itself:
+
+```yaml
+# .aikya/preview.yml
+version: 1
+runtime: bun
+packageManager: bun
+database:
+  required: true
+  provider: neon
+commands:
+  install: bun install --frozen-lockfile
+  migrate: bun run db:migrate
+  seed: bun run db:seed
+  build: bun run build
+  test: bun run test
+app:
+  command: bun run dev
+  port: 3000
+env:
+  required: [DATABASE_URL, SESSION_SECRET]
+migrations:
+  dir: drizzle
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `version` | yes | manifest schema version; currently `1` |
+| `runtime` | no | `bun`, `node`, or an image tag; inferred when omitted |
+| `packageManager` | no | `bun`, `npm`, `pnpm`, `yarn`; inferred when omitted |
+| `database.required` | no | whether a branch must be created; defaults to `true` when migrations or `DATABASE_URL` exist |
+| `database.provider` | no | `neon` or `postgres`; informational for the runner |
+| `commands.install/migrate/seed/build/test` | no | exact commands; omitted commands fall back to detection, then are skipped |
+| `app.command` / `app.port` | no | how to start the service for a reviewer agent |
+| `env.required` | no | **names** of environment variables the run needs; values come from the control plane |
+| `migrations.dir` | no | directory containing migration files |
+
+The manifest is data, not code. It is validated before use; unknown keys are
+warnings, wrong types are errors.
+
+#### Tier 2 — detection (fallback)
+
+When no manifest exists, infer from files that are already in the repository.
+Detection never executes anything.
+
+| Signal | Inferred |
+| --- | --- |
+| `package.json` → `packageManager`, `scripts.*` | runtime and commands |
+| `bun.lock` / `bun.lockb` | `bun install --frozen-lockfile` |
+| `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` |
+| `yarn.lock` | `yarn install --frozen-lockfile` |
+| `package-lock.json` | `npm ci` |
+| `drizzle.config.*` → `out`, `dialect` | migration tool and directory |
+| `drizzle/` or `migrations/` | `migrations.dir` |
+| `.env.example` / `.env.sample` | `env.required` **keys only** |
+| `Dockerfile`, `compose.yml`, `.devcontainer/` | noted as hints, not executed |
+| `.github/workflows/*.yml` | noted as hints, not parsed into commands |
+
+Detection always adds a warning explaining that commands were inferred and
+that a manifest is recommended. Detected commands are best-effort; a missing
+`test` or `migrate` script is reported, never invented.
+
+#### Tier 3 — fail closed
+
+No manifest and no `package.json` means no preview. The orchestrator fails the
+check with a message naming the missing file and the expected manifest path.
+It does not guess, and it does not run `npm test` on the off chance.
+
+#### Secrets rule
+
+`.env.example` is a **schema**, not a secret store. It lists names; the control
+plane holds values per repository. The sandbox receives only the values the
+resolved contract declares, plus the branch-scoped `DATABASE_URL`.
+
+---
+
+### Trust boundaries
+
+| Plane | Holds | Never holds |
+| --- | --- | --- |
+| Control plane | Neon API key, repo secrets, GitHub App key, registry | PR code execution |
+| Data plane | one branch, one scoped role | owner credentials |
+| Sandbox | ephemeral env vars, PR checkout | long-lived secrets, control-plane API |
+| Reviewer agent | app URL, scoped DB URL, logs, shell | staging/prod URLs, owner role |
+
+Fork PRs keep the existing behavior: no secrets, no branch, no execution; the
+check reports `skipped` with the reason.
+
+---
+
+### Workstreams
+
+#### W0 — Contract and detection (complete)
+
+**Goal:** turn a repository into a validated, inspectable preview contract
+without executing any repository code.
+
+**Tasks**
+
+- [x] Define the `PreviewContract` type and manifest schema.
+- [x] Parse `.aikya/preview.yml`, `.aikya/preview.yaml`, or `.aikya/preview.json`.
+- [x] Validate types, version, and unknown keys; fail with the file path.
+- [x] Implement Tier 2 detection from `package.json`, lockfiles, Drizzle config,
+      migration directories, and `.env.example`.
+- [x] Implement Tier 3 fail-closed behavior.
+- [x] Add `bun run preview:contract --path <repo>` to inspect a contract.
+- [x] Unit tests for manifest precedence, detection, and failures.
+- [x] Document the manifest in the README.
+
+**Acceptance:** `bun run preview:contract --path ../gh-lab` prints a contract
+for the external repo with a `source` of `manifest` or `detected`; an empty
+directory exits non-zero with a clear message; no network or database access.
+
+#### W1 — Repository sandbox (next)
+
+**Goal:** run the resolved commands against a checkout of the PR, in isolation,
+with no long-lived secrets.
+
+**Tasks**
+
+- [ ] Fetch the PR head (or `refs/pull/<n>/merge`) into a temp checkout.
+- [ ] Create a per-run scratch directory; never run in the control-plane tree.
+- [ ] Run `install`, then the remaining commands, with a scrubbed environment.
+- [ ] Enforce per-step timeout, output cap, and process-tree kill.
+- [ ] Kill the run when the PR head changes or the job is cancelled.
+- [ ] Capture stdout/stderr and exit codes as artifacts.
+- [ ] Tear down the checkout in `finally`, even on failure.
+- [ ] Hardened container/microVM isolation follows here; a subprocess with a
+      scrubbed env is the lab version, not the production one.
+
+**Acceptance:** a fixture repo runs `install → test` in a temp checkout; a
+failing command produces a failed check with the tail; no process outlives the
+run; the orchestrator's environment is not inherited.
+
+#### W2 — Subject-owned database branches
+
+**Goal:** create the preview branch in the watched repository's Neon project
+and migrate it with the PR's own migrations.
+
+**Tasks**
+
+- [ ] Add a repository registry: `owner/name → projectId, parent, migrations
+      path, seed policy, secret names`.
+- [ ] Keep the registry non-secret in `config/repos.json`; secrets in a
+      gitignored `config/repos.local.json` or environment indirection.
+- [ ] Resolve the subject project's Neon API key; never fall back to Aikya's.
+- [ ] Create `preview/<owner>-<repo>-pr-<n>` in that project, parented off the
+      configured environment branch.
+- [ ] Run the contract's `migrate` and `seed` inside the W1 sandbox.
+- [ ] Mint a branch-scoped role with a short expiry for the run.
+- [ ] Replace the preview report's schema source with the subject's schema.
+- [ ] Keep Aikya's own preview workflow working (`preview/pr-<n>`).
+
+**Acceptance:** a PR that adds a column produces a report showing that column
+on the subject branch; a PR with a failing migration fails the check; the
+pipeline's own schema is not applied to the subject branch.
+
+#### W3 — Reviewer agent
+
+**Goal:** let an agent explore a working preview without giving it control.
+
+**Tasks**
+
+- [ ] Expose the sandbox's app URL, logs, scoped DB URL, and a command runner.
+- [ ] Give the agent no control-plane token and no staging/production URL.
+- [ ] Record findings as check annotations or a PR comment, marked advisory.
+- [ ] Cap runtime and token spend per PR.
+- [ ] Keep the deterministic tests as the merge gate; the agent never is.
+
+**Acceptance:** the agent can query the preview database and hit the app; it
+cannot create or delete branches; its findings appear on the PR but do not
+change the check conclusion.
+
+#### W4 — Retention, observability, quotas
+
+**Goal:** make branches and sandboxes visible, bounded, and disposable.
+
+**Tasks**
+
+- [ ] Append create/delete/reset/sync/sandbox events to an event log.
+- [ ] Extend the branch inventory with age, TTL, owner, last report, writes.
+- [ ] Add `branch:prune --dry-run` and a dashboard dry-run preview.
+- [ ] Add a TTL reaper for sandboxes and expired preview branches.
+- [ ] Add per-repo quotas: max branches, max CU-hours, max storage delta.
+- [ ] Add stale-branch and missing-owner warnings.
+- [ ] Add a cost view: branch × CU-hours × storage.
+
+**Acceptance:** the dashboard shows every branch with age and TTL; dry-run
+lists exactly what would be deleted and deletes nothing; a reaper run is logged;
+an over-quota request is refused with the limit in the message.
+
+---
+
+### Branch, sandbox, and artifact naming
+
+| Object | Name | Notes |
+| --- | --- | --- |
+| Aikya preview | `preview/pr-<n>` | unchanged |
+| Watched preview | `preview/<owner>-<repo>-pr-<n>` | unchanged; one per PR, replaced on new head |
+| Sandbox | `sandbox/<owner>-<repo>-pr-<n>-<sha7>` | ephemeral; recreated per attempt |
+| Artifacts | `artifacts/preview/<owner>-<repo>-pr-<n>/` | unchanged |
+
+The branch name stays stable across head changes so dashboard links and
+comments keep working; the state file records `headSha` and the sandbox name.
+
+---
+
+### Default decisions (revisit if they stop fitting)
+
+1. **Manifest path** is `.aikya/preview.yml`; JSON is the zero-YAML fallback.
+2. **Registry** is explicit. A watched repo must be registered; `GITHUB_REPO`
+   alone is not enough once the subject owns a Neon project.
+3. **Sandbox first** is a subprocess with a scrubbed env, timeout, and output
+   caps. Container isolation is required before untrusted fork PRs are run.
+4. **Branch parent** is the configured environment branch (`staging` by
+   default), pinned to a SHA; `main` is the fallback when no environment exists.
+5. **Fork PRs** stay skipped until the container sandbox and no-secrets policy
+   are proven.
+6. **Aikya's own preview** remains in Aikya's project; subject repos never share
+   it.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| Manifest drift from reality | detection warnings; contract printed in the check output |
+| Running untrusted code on the host | W1 subprocess limits, W3 container isolation, no secrets |
+| Subject project key leakage | control plane only; scoped role per run; never in sandbox env |
+| Destructive migration | disposable branch; parent pinned; no promotion in W2 |
+| Cost runaway | W4 TTL, quotas, and reaper; branch TTL from W2 |
+| Detection guessing wrong | fail closed when no manifest and no `package.json`; never invent commands |
+
+### Progress log
+
+| Date | Workstream | Status |
+| --- | --- | --- |
+| 2026-11-05 | W0 | Contract types, manifest parsing, detection, CLI, tests, docs |
+| 2026-11-05 | W1–W4 | Specified; not started |
+
 ---
 
 ## Phase 1 — baseline + manual branching (complete)

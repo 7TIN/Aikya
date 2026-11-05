@@ -28,6 +28,7 @@
     "branch:prune": "bun run src/cli/branch.ts prune",
     "db:smoke": "bun run src/cli/smoke.ts",
     "branch:demo": "bun run src/cli/demo.ts",
+    "preview:contract": "bun run src/cli/contract.ts",
     "demo": "bun run src/cli/demo.ts",
     "ci:preview": "bun run src/cli/ci.ts preview",
     "ci:cleanup": "bun run src/cli/ci.ts cleanup",

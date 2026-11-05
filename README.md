@@ -77,6 +77,7 @@ can keep working independently.
 | `bun run ci:cleanup --pr <n>` | Delete a preview branch (closed event) |
 | `bun run watch --repo <owner/name>` | One pass over an external repo's open PRs → branches |
 | `bun run watch:loop --repo <owner/name>` | Poll an external repo continuously (default 120s) |
+| `bun run preview:contract --path <repo>` | Resolve a repo's preview contract without executing it (`--json`) |
 
 `branch:demo` also accepts `--parent`, `--reuse`, `--cleanup`, and `--json`.
 
@@ -243,9 +244,11 @@ reserved for Aikya's own GitHub Actions preview. Artifacts land in
 Important boundaries:
 
 - The watcher only reads PR metadata. It never checks out or executes the
-  watched repository's code; migrations and tests come from this project. A fork
-  PR is therefore handled like any other PR here, while the GitHub Actions
-  wrapper still skips forks because it runs PR code.
+  watched repository's code; migrations and tests today come from this project.
+  W0 (`preview:contract`) only reads that repository's files; W1 adds the
+  sandbox that will execute the resolved commands. A fork PR is therefore
+  handled like any other PR here, while the GitHub Actions wrapper still skips
+  forks because it runs PR code.
 - One Neon project/database is shared by all watched repositories for now. Use
   separate projects when this becomes a multi-tenant product.
 - Unauthenticated GitHub API access allows 60 requests/hour per IP, so the
@@ -259,6 +262,70 @@ Important boundaries:
 
 API: `GET /api/watch` returns the watcher status and tracked PRs;
 `POST /api/watch/sync` runs a reconciliation immediately.
+
+## Preview contract (W0)
+
+A preview needs to know how the watched repository installs, migrates, seeds,
+builds, tests, and runs itself. Aikya resolves that as a **contract** before it
+executes anything:
+
+```bash
+bun run preview:contract --path ../gh-lab
+bun run preview:contract --path ../gh-lab --json
+```
+
+Resolution has three tiers, in order:
+
+1. **Manifest** — `.aikya/preview.yml` (or `.yaml` / `.json`) committed by the
+   repository. This is the reproducible path.
+2. **Detection** — infer from `package.json`, lockfiles, `drizzle.config.*`,
+   `drizzle/` or `migrations/`, and `.env.example`. Detection is best-effort and
+   always prints a warning that a manifest is recommended.
+3. **Fail closed** — no manifest and no `package.json` means no preview. The
+   command exits non-zero; it never guesses a command.
+
+A minimal manifest:
+
+```yaml
+# .aikya/preview.yml
+version: 1
+commands:
+  install: bun install --frozen-lockfile
+  migrate: bun run db:migrate
+  seed: bun run db:seed
+  test: bun run test
+app:
+  command: bun run dev
+  port: 3000
+env:
+  required: [DATABASE_URL]
+database:
+  required: true
+  provider: neon
+migrations:
+  dir: drizzle
+```
+
+Omitted commands fall back to detection, then are reported as skipped. Unknown
+manifest keys are warnings; wrong types are errors that name the file and field.
+`.env.example` lists **names only**; values stay in the control plane and are
+never read by this command.
+
+The contract is data, not execution. It is the input to W1 (sandbox runner) and
+W2 (subject-owned database branches); see the workstream plan in
+`docs/database-branching.md`.
+
+Current finding for the external test repo:
+
+```text
+bun run preview:contract --path ../gh-lab
+source      detected
+database    not required
+test        skipped   (no test script)
+```
+
+W0 exposes the gap deliberately: `gh-lab` has no preview contract yet, so there
+is nothing meaningful to migrate or test until the repo declares one.
 
 ## Staging and QA environments (Phase 3)
 
