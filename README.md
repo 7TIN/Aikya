@@ -78,6 +78,7 @@ can keep working independently.
 | `bun run watch --repo <owner/name>` | One pass over an external repo's open PRs → branches |
 | `bun run watch:loop --repo <owner/name>` | Poll an external repo continuously (default 120s) |
 | `bun run preview:contract --path <repo>` | Resolve a repo's preview contract without executing it (`--json`) |
+| `bun run preview:sandbox --repo <repo>` | Check out a ref and run the contract in a throwaway sandbox (`--steps`, `--ref`, `--keep`, `--json`) |
 
 `branch:demo` also accepts `--parent`, `--reuse`, `--cleanup`, and `--json`.
 
@@ -326,6 +327,49 @@ test        skipped   (no test script)
 
 W0 exposes the gap deliberately: `gh-lab` has no preview contract yet, so there
 is nothing meaningful to migrate or test until the repo declares one.
+
+## Local sandbox (W1)
+
+`preview:sandbox` checks out a repository at a ref, resolves its contract from
+that checkout, and runs the configured steps in a throwaway directory.
+
+```bash
+bun run preview:sandbox --repo ../gh-lab --steps test
+bun run preview:sandbox --repo ../gh-lab --ref <sha> --steps test
+bun run preview:sandbox --repo <git-url> --ref refs/pull/123/merge --steps install,test
+bun run preview:sandbox --repo ../gh-lab --steps test --env DATABASE_URL=... --keep
+```
+
+What it does:
+
+- clones a local git repository or git URL; copies a plain directory
+- checks out `--ref` (SHA, branch, or `refs/pull/<n>/merge`)
+- resolves the contract **inside the checkout**, so the PR's own manifest wins
+- runs `install → migrate → seed → build → test`, or the steps you pass
+- enforces a per-step timeout (`--timeout 10m`), output cap (`--max-output`),
+  and process-tree kill
+- scrubs the environment: only `PATH`, home, and temp variables pass through,
+  plus explicit `--env KEY=VALUE`; `DATABASE_URL`, `NEON_API_KEY`, and
+  `GITHUB_TOKEN` are **not** inherited
+- deletes the checkout in `finally`; `--keep` preserves it for inspection
+- supports `--json` for machine-readable results
+
+Example output:
+
+```text
+Sandbox run
+────────────────────────────────────────
+source      C:\...\aikya-demo-repo
+contract    manifest (.aikya/preview.yml)
+result      ok in 1s
+
+✔ test     1s · exit 0
+```
+
+Important: this is the **local lab backend**, not a security boundary. It
+reduces accidents, but fork PRs stay skipped until the container/Vercel Sandbox
+backend exists. The runner keeps a stable `SandboxResult` so that backend can
+replace only checkout preparation and step execution.
 
 ## Staging and QA environments (Phase 3)
 

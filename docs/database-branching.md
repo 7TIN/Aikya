@@ -325,26 +325,35 @@ without executing any repository code.
 for the external repo with a `source` of `manifest` or `detected`; an empty
 directory exits non-zero with a clear message; no network or database access.
 
-#### W1 — Repository sandbox (next)
+#### W1 — Repository sandbox (local backend complete; remote pending)
 
 **Goal:** run the resolved commands against a checkout of the PR, in isolation,
 with no long-lived secrets.
 
+The local backend is a temp checkout plus a scrubbed-environment subprocess. It
+is deliberately not a security boundary: it reduces accidents, but untrusted
+fork PRs stay skipped until the remote backend exists. **Vercel Sandbox** is the
+chosen remote backend for later; it will replace `prepareCheckout` (create the
+sandbox, clone inside it) and `runStep` (execute there) while keeping the same
+`SandboxResult` shape.
+
 **Tasks**
 
-- [ ] Fetch the PR head (or `refs/pull/<n>/merge`) into a temp checkout.
-- [ ] Create a per-run scratch directory; never run in the control-plane tree.
-- [ ] Run `install`, then the remaining commands, with a scrubbed environment.
-- [ ] Enforce per-step timeout, output cap, and process-tree kill.
-- [ ] Kill the run when the PR head changes or the job is cancelled.
-- [ ] Capture stdout/stderr and exit codes as artifacts.
-- [ ] Tear down the checkout in `finally`, even on failure.
-- [ ] Hardened container/microVM isolation follows here; a subprocess with a
-      scrubbed env is the lab version, not the production one.
+- [x] Fetch the PR head (or `refs/pull/<n>/merge`) into a temp checkout.
+- [x] Create a per-run scratch directory; never run in the control-plane tree.
+- [x] Run `install`, then the remaining commands, with a scrubbed environment.
+- [x] Enforce per-step timeout, output cap, and process-tree kill.
+- [x] Kill the run when the job is cancelled (`AbortSignal`).
+- [x] Capture stdout/stderr and exit codes in the step results.
+- [x] Tear down the checkout in `finally`, even on failure.
+- [ ] Persist step logs as preview artifacts when W2 wires the runner in.
+- [ ] Add the Vercel Sandbox backend and keep this one as the local fallback.
+- [ ] Harden with container/microVM isolation before running fork PRs.
 
-**Acceptance:** a fixture repo runs `install → test` in a temp checkout; a
-failing command produces a failed check with the tail; no process outlives the
-run; the orchestrator's environment is not inherited.
+**Acceptance (local):** a fixture repo runs a step in a temp checkout; a failing
+command reports its exit code and output tail; a timeout kills the step; a
+secret in the orchestrator's environment is absent inside the run; the scratch
+directory is removed afterwards. All verified by `src/preview/sandbox.test.ts`.
 
 #### W2 — Subject-owned database branches
 
@@ -449,7 +458,8 @@ comments keep working; the state file records `headSha` and the sandbox name.
 | Date | Workstream | Status |
 | --- | --- | --- |
 | 2026-11-05 | W0 | Contract types, manifest parsing, detection, CLI, tests, docs |
-| 2026-11-05 | W1–W4 | Specified; not started |
+| 2026-11-05 | W1 | Local sandbox: temp checkout, ref checkout, scrubbed env, timeouts, output caps, cancellation, teardown, CLI, tests |
+| 2026-11-05 | W1–W4 | Vercel Sandbox backend and W2–W4 not started |
 
 ---
 
