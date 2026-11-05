@@ -74,7 +74,9 @@ can keep working independently.
 | `bun run branch:demo` | Create branch → feature SQL → branch data → report |
 | `bun run branch:report --base-url U --branch-url U` | Compare any two databases |
 | `bun run ci:preview --pr <n> --event <event>` | Local PR preview: create/recreate → migrate → test → report |
+| `bun run ci:preview --repo <owner/name> --pr <n> [--ref <sha>]` | Subject-owned preview: branch in the repo's Neon project and run its own contract |
 | `bun run ci:cleanup --pr <n>` | Delete a preview branch (closed event) |
+| `bun run ci:cleanup --repo <owner/name> --pr <n>` | Delete a watched repo's preview branch |
 | `bun run watch --repo <owner/name>` | One pass over an external repo's open PRs → branches |
 | `bun run watch:loop --repo <owner/name>` | Poll an external repo continuously (default 120s) |
 | `bun run preview:contract --path <repo>` | Resolve a repo's preview contract without executing it (`--json`) |
@@ -244,12 +246,11 @@ reserved for Aikya's own GitHub Actions preview. Artifacts land in
 
 Important boundaries:
 
-- The watcher only reads PR metadata. It never checks out or executes the
-  watched repository's code; migrations and tests today come from this project.
-  W0 (`preview:contract`) only reads that repository's files; W1 adds the
-  sandbox that will execute the resolved commands. A fork PR is therefore
-  handled like any other PR here, while the GitHub Actions wrapper still skips
-  forks because it runs PR code.
+- Fork PRs are never executed by the watcher (same-repository heads only; an
+  unknown head repo is also skipped). This local runner is not a security
+  boundary, so fork PRs stay skipped until the hardened container/Vercel
+  Sandbox backend exists. Same-repository PRs run their own contract in the W1
+  sandbox; they inherit no Aikya credentials.
 - One Neon project/database is shared by all watched repositories for now. Use
   separate projects when this becomes a multi-tenant product.
 - Unauthenticated GitHub API access allows 60 requests/hour per IP, so the
@@ -370,6 +371,96 @@ Important: this is the **local lab backend**, not a security boundary. It
 reduces accidents, but fork PRs stay skipped until the container/Vercel Sandbox
 backend exists. The runner keeps a stable `SandboxResult` so that backend can
 replace only checkout preparation and step execution.
+
+## Subject-owned previews (W2)
+
+A watched repository is **not** a consumer of Aikya's database. Its preview
+branch belongs to the Neon project registered for that repository, and the PR's
+own migration commands run against it. Aikya's own `preview/pr-<n>` workflow
+remains unchanged.
+
+### Registry
+
+`config/repos.json` is committed and carries no secrets. It names the project,
+its parent branch, the database, and the environment variable holding the Neon
+key:
+
+```json
+{
+  "repo": "7TIN/gh-lab",
+  "projectId": "flat-resonance-58366530",
+  "parent": "main",
+  "apiKeyEnv": "NEON_API_KEY_7TIN_GH_LAB",
+  "source": "https://github.com/7TIN/gh-lab.git",
+  "database": "neondb",
+  "stepTimeoutMs": 600000
+}
+```
+
+`config/repos.local.json` is gitignored and **replaces** the committed entry for
+the same repo. Use it for local checkouts, a lab project id, or a different
+machine-specific key variable.
+
+Rules:
+
+- A watched repo without a registry entry fails closed; Aikya's migrations are
+  never applied to it.
+- If `apiKeyEnv` is a variable name and that variable is missing, the repo
+  sync reports a configuration error and no branch is created. It never falls
+  back to `NEON_PROJECT_ID` / `NEON_API_KEY`.
+- `"apiKeyEnv": null` explicitly selects the local Neon CLI login (useful in
+  the lab). The child process still has ambient `NEON_API_KEY` removed.
+- `source` may be a local path or a git URL; omitted means the GitHub repo.
+- `steps`, `envFrom`, `database`, and `stepTimeoutMs` are optional.
+- Relative `source` / `envFrom` paths are resolved from the registry file.
+- `role` is reserved for branch-scoped role minting; it is not applied yet.
+
+`main` is the usual parent for the shared lab project. A separate subject
+project works too: change `projectId` and the key variable without any code
+changes.
+
+### Running a subject preview
+
+```bash
+bun run ci:preview --repo 7TIN/gh-lab --pr 123 --ref <sha>
+bun run ci:preview --repo 7TIN/gh-lab --pr 123 --event closed
+```
+
+For the watcher, open/synchronize passes the PR head SHA as `--ref`; deleting
+the PR (or its branch) uses the same subject context. The preview report and
+all step logs (`report.json` → `steps[].output`) appear in
+`artifacts/preview/<repo>-pr-<n>/`.
+
+What happens inside a run:
+
+1. Create/replace `preview/<owner>-<repo>-pr-<n>` in the **subject** project.
+2. Fetch the PR head into the W1 sandbox.
+3. Resolve the contract inside that checkout.
+4. Run the repo's `install`, `migrate`, `seed`, `build`, and `test` against the
+   branch's `DATABASE_URL`; every other credential is scrubbed.
+5. Compare the subject parent vs the preview branch.
+6. A failing migration marks the run failed; a `closed` event deletes the branch.
+
+### Verified in the lab
+
+Because `gh-lab` has no database contract yet, W2 was verified with a
+gitignored local fixture in the shared lab project:
+
+- the migration added `customers.preview_note` in the preview branch only;
+- the report showed `+ column preview_note` and `+1` row;
+- `main` had zero `preview_note` columns afterwards;
+- a deliberately failing migration exited non-zero and was cleaned up;
+- `--event closed` deleted the created branches; only `main`, `qa`, and
+  `staging` remain.
+
+The committed registry is deliberately strict. The lab uses a gitignored
+`config/repos.local.json` with `"apiKeyEnv": null` (explicit CLI login) and the
+shared project id; a fresh clone without that file fails closed until a subject
+key is provided.
+
+To make `gh-lab` itself produce a meaningful preview, commit a
+`.aikya/preview.yml` with a migrate command (and a database), or add the
+corresponding scripts and a Drizzle config.
 
 ## Staging and QA environments (Phase 3)
 

@@ -103,6 +103,53 @@ describe("unconfiguredWatchStatus", () => {
 });
 
 describe("WatchService", () => {
+  test("fails closed when a registered repo's key is missing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "aikya-watch-"));
+    const registryPath = join(dir, "repos.json");
+    const statePath = join(dir, "state.json");
+
+    try {
+      await writeFile(
+        registryPath,
+        JSON.stringify({
+          version: 1,
+          repos: [
+            {
+              repo: "owner/subject",
+              projectId: "subject-project",
+              apiKeyEnv: "AIKYA_TEST_MISSING_KEY",
+            },
+          ],
+        }),
+        "utf8",
+      );
+      delete process.env.AIKYA_TEST_MISSING_KEY;
+
+      const service = new WatchService({
+        repos: ["owner/subject"],
+        pollMs: 120_000,
+        watchOnStart: false,
+        runTests: false,
+        statePath,
+        registryPath,
+        localRegistryPath: join(dir, "missing.local.json"),
+      });
+
+      const result = await service.syncNow("test");
+
+      expect(result.summaries).toHaveLength(1);
+      expect(result.summaries[0]?.error).toContain(
+        "AIKYA_TEST_MISSING_KEY",
+      );
+      expect(result.summaries[0]?.pullRequests).toEqual([]);
+      expect(service.status().lastError).toContain("AIKYA_TEST_MISSING_KEY");
+      expect(service.status().pullRequests).toEqual([]);
+    } finally {
+      delete process.env.AIKYA_TEST_MISSING_KEY;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("marks a manually deleted branch so the next poll recreates it", async () => {
     const dir = await mkdtemp(join(tmpdir(), "aikya-watch-"));
     const statePath = join(dir, "state.json");

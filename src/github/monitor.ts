@@ -6,6 +6,7 @@ import {
   runPreview,
   type PreviewOptions,
   type PreviewResult,
+  type SubjectPreviewConfig,
 } from "../ci/preview.ts";
 import {
   listOpenPullRequests,
@@ -77,6 +78,30 @@ export interface SyncSummary {
   pullRequests: SyncPullRequestOutcome[];
 }
 
+/** A summary for a repository that could not be synced at all (config error). */
+export function failedSyncSummary(
+  repo: string,
+  error: string,
+  now: number = Date.now(),
+): SyncSummary {
+  const timestamp = new Date(now).toISOString();
+  return {
+    repo,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    fetched: 0,
+    created: 0,
+    recreated: 0,
+    reopened: 0,
+    deleted: 0,
+    unchanged: 0,
+    failed: 0,
+    complete: false,
+    error,
+    pullRequests: [],
+  };
+}
+
 export interface SyncDependencies {
   fetchPullRequests?: (
     repo: string,
@@ -90,6 +115,8 @@ export interface SyncRepositoryOptions {
   state: MonitorState;
   parent?: string;
   runTests?: boolean;
+  /** Run the watched repo's own contract in its own Neon project (W2). */
+  subject?: SubjectPreviewConfig | null;
   /** Failed previews are retried after this many milliseconds. */
   retryMs?: number;
   /** Override the artifact directory (tests). */
@@ -319,7 +346,9 @@ export async function syncRepository(
   const now = options.deps?.now?.() ?? Date.now();
   const retryMs = options.retryMs ?? 5 * 60_000;
   const runTests = options.runTests ?? true;
-  const parent = options.parent ?? "main";
+  const parent = options.subject
+    ? options.subject.parent ?? "main"
+    : options.parent ?? "main";
   const log = options.log ?? (() => {});
   const fetchPullRequests =
     options.deps?.fetchPullRequests ??
@@ -370,8 +399,41 @@ export async function syncRepository(
   for (const pr of fetched.pullRequests) {
     const key = String(pr.number);
     const previous = repoState.pullRequests[key];
-    const decision = decideAction(previous, pr, { now, retryMs });
     const branch = monitorBranchName(repo, pr.number);
+
+    // W2 can execute the PR's code, so never treat another repository's head
+    // (or an unknown head) as trusted. The local sandbox is not a security
+    // boundary; fork PRs stay skipped until the hardened backend exists.
+    if (pr.headIsFork) {
+      const reason = pr.headRepo
+        ? `fork head (${pr.headRepo}); not executed until the sandbox is hardened`
+        : "head repository is unknown; treated as untrusted";
+      repoState.pullRequests[key] = {
+        ...metadata(pr),
+        ...(previous ?? {}),
+        number: pr.number,
+        headSha: pr.headSha,
+        branch,
+        status: "skipped",
+        event: null,
+        syncedAt: previous?.syncedAt ?? null,
+        lastAttemptAt: previous?.lastAttemptAt ?? null,
+        error: null,
+      };
+      summary.unchanged += 1;
+      summary.pullRequests.push({
+        number: pr.number,
+        action: "skip",
+        status: "skipped",
+        branch,
+        headSha: pr.headSha,
+        error: reason,
+      });
+      log(`#${pr.number} skipped: ${reason}`);
+      continue;
+    }
+
+    const decision = decideAction(previous, pr, { now, retryMs });
 
     if (decision.action === "skip" || decision.action === "retry") {
       if (previous) {
@@ -400,6 +462,9 @@ export async function syncRepository(
         parent,
         runTests,
         artifactsDir: artifactsDir(repo, pr.number),
+        subject: options.subject
+          ? { ...options.subject, ref: pr.headSha }
+          : undefined,
         source: {
           repo,
           title: pr.title,
@@ -481,6 +546,9 @@ export async function syncRepository(
           parent,
           runTests: false,
           artifactsDir: artifactsDir(repo, previous.number),
+          subject: options.subject
+            ? { ...options.subject, ref: previous.headSha }
+            : undefined,
           source: {
             repo,
             title: previous.title,

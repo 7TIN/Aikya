@@ -1,8 +1,9 @@
 /**
  * Minimal GitHub REST client for the local repository watcher.
  *
- * Only pull-request metadata is read. The watched repository's code is never
- * executed: migrations and tests always come from this project.
+ * Pull-request metadata is read so the watcher can detect open, updated, and
+ * closed PRs. Execution is limited to explicitly registered same-repository
+ * PRs; fork and unknown-head PRs are skipped and never run code.
  */
 
 const API = "https://api.github.com";
@@ -20,6 +21,13 @@ export interface GithubPullRequest {
   author: string | null;
   headSha: string;
   headRef: string;
+  /** Source repository of the head branch (`owner/name`), when GitHub exposes it. */
+  headRepo: string | null;
+  /**
+   * True when the PR comes from another repository, a fork, or the head repo
+   * is unknown. The watcher never executes untrusted PR code.
+   */
+  headIsFork: boolean;
   baseRef: string;
   createdAt: string;
   updatedAt: string;
@@ -33,7 +41,11 @@ interface RawPullRequest {
   merged_at?: string | null;
   html_url?: string;
   user?: { login?: string } | null;
-  head?: { sha?: string; ref?: string } | null;
+  head?: {
+    sha?: string;
+    ref?: string;
+    repo?: { full_name?: string; fork?: boolean | null } | null;
+  } | null;
   base?: { ref?: string } | null;
   created_at?: string;
   updated_at?: string;
@@ -84,10 +96,18 @@ function headers(token?: string): Record<string, string> {
   return result;
 }
 
-function toPullRequest(raw: RawPullRequest): GithubPullRequest | null {
+function toPullRequest(
+  raw: RawPullRequest,
+  baseRepo: string,
+): GithubPullRequest | null {
   if (typeof raw.number !== "number" || !Number.isInteger(raw.number)) return null;
   const headSha = raw.head?.sha;
   if (!headSha) return null;
+
+  const headRepo = raw.head?.repo?.full_name?.trim() || null;
+  const sameRepo =
+    headRepo !== null && headRepo.toLowerCase() === baseRepo.toLowerCase();
+  const headIsFork = !sameRepo;
 
   return {
     number: raw.number,
@@ -99,6 +119,8 @@ function toPullRequest(raw: RawPullRequest): GithubPullRequest | null {
     author: raw.user?.login ?? null,
     headSha,
     headRef: raw.head?.ref ?? "",
+    headRepo,
+    headIsFork,
     baseRef: raw.base?.ref ?? "main",
     createdAt: raw.created_at ?? "",
     updatedAt: raw.updated_at ?? "",
@@ -182,7 +204,7 @@ async function fetchPage(options: FetchPageOptions): Promise<{
   const raw = (await response.json()) as unknown;
   const items = Array.isArray(raw)
     ? raw
-        .map((entry) => toPullRequest(entry as RawPullRequest))
+        .map((entry) => toPullRequest(entry as RawPullRequest, options.repo))
         .filter((entry): entry is GithubPullRequest => entry !== null)
     : [];
 

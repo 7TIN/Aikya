@@ -3,6 +3,7 @@ import {
   neonProjectId,
   runNeon,
   runNeonJson,
+  type NeonContext,
 } from "./cli.ts";
 
 export interface NeonBranch {
@@ -69,13 +70,13 @@ function toBranch(raw: RawBranch): NeonBranch {
   };
 }
 
-export async function listBranches(): Promise<NeonBranch[]> {
-  const raw = await runNeonJson<RawBranch[]>([
-    "branch",
-    "list",
-    "--project-id",
-    neonProjectId(),
-  ]);
+export async function listBranches(
+  context?: NeonContext,
+): Promise<NeonBranch[]> {
+  const raw = await runNeonJson<RawBranch[]>(
+    ["branch", "list", "--project-id", neonProjectId(context)],
+    context,
+  );
 
   return raw
     .map(toBranch)
@@ -85,14 +86,14 @@ export async function listBranches(): Promise<NeonBranch[]> {
     });
 }
 
-export async function getBranch(name: string): Promise<NeonBranch> {
-  const raw = await runNeonJson<RawBranch | RawBranch[]>([
-    "branch",
-    "get",
-    name,
-    "--project-id",
-    neonProjectId(),
-  ]);
+export async function getBranch(
+  name: string,
+  context?: NeonContext,
+): Promise<NeonBranch> {
+  const raw = await runNeonJson<RawBranch | RawBranch[]>(
+    ["branch", "get", name, "--project-id", neonProjectId(context)],
+    context,
+  );
 
   const branch = Array.isArray(raw) ? raw[0] : raw;
   if (!branch) throw new Error(`Branch "${name}" was not found`);
@@ -102,11 +103,12 @@ export async function getBranch(name: string): Promise<NeonBranch> {
 export async function waitForBranchReady(
   name: string,
   timeoutMs = 120_000,
+  context?: NeonContext,
 ): Promise<NeonBranch> {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
-    const branch = await getBranch(name);
+    const branch = await getBranch(name, context);
     if (branch.currentState === "ready") return branch;
     if (["failed", "deleted"].includes(branch.currentState)) {
       throw new Error(`Branch "${name}" entered state "${branch.currentState}"`);
@@ -121,6 +123,7 @@ export interface CreateBranchOptions {
   name: string;
   parent?: string;
   expiresAt?: string;
+  context?: NeonContext;
 }
 
 export async function createBranch(
@@ -130,7 +133,7 @@ export async function createBranch(
     "branch",
     "create",
     "--project-id",
-    neonProjectId(),
+    neonProjectId(options.context),
     "--name",
     options.name,
     "--parent",
@@ -142,53 +145,59 @@ export async function createBranch(
     args.push("--expires-at", options.expiresAt);
   }
 
-  await runNeon([...args, "-o", "json"]);
-  return waitForBranchReady(options.name);
+  await runNeon([...args, "-o", "json"], options.context);
+  return waitForBranchReady(options.name, undefined, options.context);
 }
 
-export async function deleteBranch(name: string): Promise<void> {
-  await runNeon([
-    "branch",
-    "delete",
-    name,
-    "--project-id",
-    neonProjectId(),
-  ]);
+export async function deleteBranch(
+  name: string,
+  context?: NeonContext,
+): Promise<void> {
+  await runNeon(
+    ["branch", "delete", name, "--project-id", neonProjectId(context)],
+    context,
+  );
 }
 
 /**
  * Reset a branch to its parent without changing its id or connection string.
  * Used by `branch:reset` for long-lived environment branches.
  */
-export async function resetBranchToParent(name: string): Promise<NeonBranch> {
-  await runNeon([
-    "branch",
-    "reset",
-    name,
-    "--project-id",
-    neonProjectId(),
-    "--parent",
-  ]);
-  return waitForBranchReady(name);
+export async function resetBranchToParent(
+  name: string,
+  context?: NeonContext,
+): Promise<NeonBranch> {
+  await runNeon(
+    [
+      "branch",
+      "reset",
+      name,
+      "--project-id",
+      neonProjectId(context),
+      "--parent",
+    ],
+    context,
+  );
+  return waitForBranchReady(name, undefined, context);
 }
 
 /** Connection string for a branch, using the CLI (works with claimed projects). */
 export async function branchConnectionString(
   branch: string,
-  options: { pooled?: boolean } = {},
+  options: { pooled?: boolean; context?: NeonContext } = {},
 ): Promise<string> {
   const args = [
     "connection-string",
     branch,
     "--project-id",
-    neonProjectId(),
+    neonProjectId(options.context),
     "--database-name",
-    defaultDatabaseName(),
+    defaultDatabaseName(options.context),
   ];
 
   if (options.pooled) args.push("--pooled");
 
-  const output = await runNeon(args);
+  const output = await runNeon(args, options.context);
   const line = output
     .split(/\r?\n/)
     .map((value) => value.trim())
@@ -210,16 +219,20 @@ export async function branchConnectionString(
 export async function neonSchemaDiff(
   baseBranch: string,
   compareBranch: string,
+  context?: NeonContext,
 ): Promise<string | null> {
   try {
-    const output = await runNeon([
-      "branch",
-      "schema-diff",
-      baseBranch,
-      compareBranch,
-      "--project-id",
-      neonProjectId(),
-    ]);
+    const output = await runNeon(
+      [
+        "branch",
+        "schema-diff",
+        baseBranch,
+        compareBranch,
+        "--project-id",
+        neonProjectId(context),
+      ],
+      context,
+    );
     return output.trim() || null;
   } catch {
     // Not fatal: the local diff is the source of truth for the report.

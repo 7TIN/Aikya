@@ -9,15 +9,50 @@ export class NeonCliError extends Error {
   }
 }
 
-export function neonProjectId(): string {
-  const projectId = process.env.NEON_PROJECT_ID;
+/**
+ * Everything a Neon call needs to target one specific project.
+ *
+ * A watched repository gets its own context from `config/repos.json`; when a
+ * context is present, `runNeon` **removes** ambient `NEON_PROJECT_ID` and
+ * `NEON_API_KEY` before spawning the CLI. A missing subject key therefore fails
+ * closed instead of silently using Aikya's project or key.
+ */
+export interface NeonContext {
+  projectId?: string;
+  apiKey?: string;
+  /** Database inside the project. Defaults to NEON_DATABASE_NAME or `neondb`. */
+  database?: string;
+}
+
+export function neonProjectId(context?: NeonContext): string {
+  const projectId = context ? context.projectId : process.env.NEON_PROJECT_ID;
   if (!projectId) {
     throw new Error(
-      "NEON_PROJECT_ID is not set. Add it to .env.local (Neon console → Project settings) " +
-        "or run the branch commands with a claimed Neon project.",
+      context
+        ? "The subject Neon context has no projectId. Add projectId to the repository entry in config/repos.json."
+        : "NEON_PROJECT_ID is not set. Add it to .env.local (Neon console → Project settings) " +
+          "or run the branch commands with a claimed Neon project.",
     );
   }
   return projectId;
+}
+
+/**
+ * Build the child environment for a context. Ambient Neon credentials are
+ * always removed, then only the context's explicit values are added back.
+ * Exported so the fail-closed behaviour can be tested without spawning the CLI.
+ */
+export function neonChildEnv(
+  context: NeonContext,
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...process.env };
+  delete env.NEON_API_KEY;
+  delete env.NEON_PROJECT_ID;
+
+  if (context.apiKey) env.NEON_API_KEY = context.apiKey;
+  if (context.projectId) env.NEON_PROJECT_ID = context.projectId;
+
+  return env;
 }
 
 function troubleshootingHint(stderr: string): string {
@@ -61,10 +96,16 @@ function troubleshootingHint(stderr: string): string {
 }
 
 /** Run the Neon CLI and return stdout. Throws NeonCliError on failure. */
-export async function runNeon(args: string[]): Promise<string> {
+export async function runNeon(
+  args: string[],
+  context?: NeonContext,
+): Promise<string> {
   const proc = Bun.spawn(["neon", ...args], {
     stdout: "pipe",
     stderr: "pipe",
+    // Undefined keeps the current inherited-environment behaviour for Aikya's
+    // own project. A subject context is scrubbed and then rebuilt.
+    env: context ? neonChildEnv(context) : undefined,
   });
 
   const [stdout, stderr, exitCode] = await Promise.all([
@@ -86,8 +127,11 @@ export async function runNeon(args: string[]): Promise<string> {
 }
 
 /** Run a Neon CLI command with `-o json` and parse the result. */
-export async function runNeonJson<T>(args: string[]): Promise<T> {
-  const output = await runNeon([...args, "-o", "json"]);
+export async function runNeonJson<T>(
+  args: string[],
+  context?: NeonContext,
+): Promise<T> {
+  const output = await runNeon([...args, "-o", "json"], context);
   return parseJson<T>(output);
 }
 
@@ -106,9 +150,12 @@ function parseJson<T>(output: string): T {
   }
 }
 
-export function defaultDatabaseName(): string {
-  const explicit = process.env.NEON_DATABASE_NAME;
+export function defaultDatabaseName(context?: NeonContext): string {
+  const explicit = context?.database ?? process.env.NEON_DATABASE_NAME;
   if (explicit) return explicit;
+
+  // Never infer the subject database from Aikya's DATABASE_URL.
+  if (context) return "neondb";
 
   const url = process.env.DATABASE_URL;
   if (url) {

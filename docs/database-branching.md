@@ -355,28 +355,51 @@ command reports its exit code and output tail; a timeout kills the step; a
 secret in the orchestrator's environment is absent inside the run; the scratch
 directory is removed afterwards. All verified by `src/preview/sandbox.test.ts`.
 
-#### W2 — Subject-owned database branches
+#### W2 — Subject-owned database branches (complete except branch-scoped roles)
 
 **Goal:** create the preview branch in the watched repository's Neon project
 and migrate it with the PR's own migrations.
 
 **Tasks**
 
-- [ ] Add a repository registry: `owner/name → projectId, parent, migrations
-      path, seed policy, secret names`.
-- [ ] Keep the registry non-secret in `config/repos.json`; secrets in a
-      gitignored `config/repos.local.json` or environment indirection.
-- [ ] Resolve the subject project's Neon API key; never fall back to Aikya's.
-- [ ] Create `preview/<owner>-<repo>-pr-<n>` in that project, parented off the
-      configured environment branch.
-- [ ] Run the contract's `migrate` and `seed` inside the W1 sandbox.
-- [ ] Mint a branch-scoped role with a short expiry for the run.
-- [ ] Replace the preview report's schema source with the subject's schema.
-- [ ] Keep Aikya's own preview workflow working (`preview/pr-<n>`).
+- [x] Add a repository registry: `owner/name → projectId, parent, database,
+      source/path, timeout, steps, key variable`.
+- [x] Keep the registry non-secret in `config/repos.json`; machine-specific
+      paths and local overrides live in the gitignored
+      `config/repos.local.json` (local entries replace committed entries).
+- [x] Resolve the subject project's Neon API key without falling back to
+      Aikya's: a named `apiKeyEnv` fails closed when absent; ambient
+      `NEON_PROJECT_ID` / `NEON_API_KEY` are removed from the child process;
+      `apiKeyEnv: null` explicitly selects the local Neon CLI login for the
+      lab.
+- [x] Create `preview/<owner>-<repo>-pr-<n>` in that project, parented off the
+      configured environment branch (`main` in the shared lab project).
+- [x] Skip fork and unknown-head PRs; the local sandbox is not a security
+      boundary, so only same-repository PR code is executed.
+- [x] Run the contract's `migrate` and `seed` inside the W1 sandbox with the
+      branch-scoped `DATABASE_URL`.
+- [ ] Mint a branch-scoped role with a short expiry for the run. Deferred: the
+      local lab uses the branch owner's connection string; role minting starts
+      when the remote sandbox can split migrate and test credentials.
+- [x] Replace the preview report's schema source with the subject's schema;
+      ambient `DATABASE_URL` is not reused, and the report records the subject
+      project, database, and branch state.
+- [x] Keep Aikya's own preview workflow working (`preview/pr-<n>`).
+- [x] Persist sandbox step logs in `report.json` → `steps[].output`.
+- [x] Verify live in the lab with a gitignored local fixture: the migration
+      added `customers.preview_note`; the report showed `+ column preview_note`
+      and `+1` row; `main` stayed unchanged; a failing migration failed the
+      check; `--event closed` deleted the branches and `main`, `qa`, `staging`
+      remain.
 
 **Acceptance:** a PR that adds a column produces a report showing that column
 on the subject branch; a PR with a failing migration fails the check; the
-pipeline's own schema is not applied to the subject branch.
+pipeline's own schema is not applied to the subject branch. Verified with the
+fixture above.
+
+**Note:** `gh-lab` has no database contract yet, so the lab verification used a
+temporary git fixture and the shared Neon project. Committing
+`.aikya/preview.yml` to `gh-lab` will let the same path run for its PRs.
 
 #### W3 — Reviewer agent
 
@@ -448,7 +471,7 @@ comments keep working; the state file records `headSha` and the sandbox name.
 | --- | --- |
 | Manifest drift from reality | detection warnings; contract printed in the check output |
 | Running untrusted code on the host | W1 subprocess limits, W3 container isolation, no secrets |
-| Subject project key leakage | control plane only; scoped role per run; never in sandbox env |
+| Subject project key leakage | control plane only; named key env or explicit CLI login; ambient keys scrubbed; branch-scoped role when the remote sandbox can split migrate/test creds; never in sandbox env |
 | Destructive migration | disposable branch; parent pinned; no promotion in W2 |
 | Cost runaway | W4 TTL, quotas, and reaper; branch TTL from W2 |
 | Detection guessing wrong | fail closed when no manifest and no `package.json`; never invent commands |
@@ -459,7 +482,8 @@ comments keep working; the state file records `headSha` and the sandbox name.
 | --- | --- | --- |
 | 2026-11-05 | W0 | Contract types, manifest parsing, detection, CLI, tests, docs |
 | 2026-11-05 | W1 | Local sandbox: temp checkout, ref checkout, scrubbed env, timeouts, output caps, cancellation, teardown, CLI, tests |
-| 2026-11-05 | W1–W4 | Vercel Sandbox backend and W2–W4 not started |
+| 2026-11-06 | W2 | Subject registry, isolated Neon context, subject preview runner, step logs in artifacts, live fixture verification; branch-scoped roles deferred |
+| 2026-11-06 | W3–W4 | Vercel Sandbox backend and W3–W4 not started |
 
 ---
 

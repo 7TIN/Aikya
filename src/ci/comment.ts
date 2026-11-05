@@ -85,6 +85,18 @@ function statusDetails(result: PreviewResult): string[] {
   if (result.source?.repo) {
     lines.push(`| Repository | \`${mdCell(result.source.repo)}\` |`);
   }
+  if (result.subject) {
+    lines.push(`| Subject repo | \`${mdCell(result.subject.repo)}\` |`);
+    if (result.subject.projectId) {
+      lines.push(`| Neon project | \`${mdCell(result.subject.projectId)}\` |`);
+    }
+    if (result.subject.database) {
+      lines.push(`| Database | \`${mdCell(result.subject.database)}\` |`);
+    }
+    if (result.subject.ref) {
+      lines.push(`| Commit | \`${mdCell(result.subject.ref.slice(0, 12))}\` |`);
+    }
+  }
   if (result.source?.title) {
     const title = mdCell(result.source.title);
     const link = result.source.url
@@ -151,11 +163,6 @@ function statusDetails(result: PreviewResult): string[] {
     );
   }
 
-  lines.push(
-    "",
-    `<sub>Artifacts: \`artifacts/preview/pr-${result.pr}/report.json\` and \`comment.md\`.</sub>`,
-  );
-
   return lines;
 }
 
@@ -166,10 +173,19 @@ function statusDetails(result: PreviewResult): string[] {
 export function renderPreviewComment(result: PreviewResult): string {
   const header = `### ${STATUS_LABEL[result.status]}`;
   const reason = result.reason ? `\n_${result.reason}_` : "";
+  const dir = result.artifacts?.dir.replace(/\\/g, "/");
+  const marker = dir ? dir.indexOf("/artifacts/") : -1;
+  const artifactPath =
+    dir && marker >= 0
+      ? dir.slice(marker + 1)
+      : (dir ?? `artifacts/preview/pr-${result.pr}`);
+
   return [
     PREVIEW_COMMENT_MARKER,
     header + reason,
     ...statusDetails(result),
+    "",
+    `<sub>Artifacts: \`${artifactPath}/report.json\` and \`comment.md\`.</sub>`,
     "",
   ].join("\n");
 }

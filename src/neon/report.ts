@@ -23,7 +23,7 @@ import {
   neonSchemaDiff,
   type NeonBranch,
 } from "./branches.ts";
-import { parentBranchName } from "./cli.ts";
+import { defaultDatabaseName, parentBranchName, type NeonContext } from "./cli.ts";
 
 export interface TableComparison {
   table: string;
@@ -40,6 +40,10 @@ export interface BranchReport {
   branch: {
     name: string;
     id?: string;
+    /** Neon project that owns the branch, when Neon mode is used. */
+    projectId?: string;
+    /** Database inside the project that was compared. */
+    database?: string;
     state?: string;
     createdAt?: string;
     /** Neon logical size (all databases, inherited + branch-local). */
@@ -50,6 +54,7 @@ export interface BranchReport {
   parent: {
     name: string;
     id?: string;
+    projectId?: string;
     state?: string;
     createdAt?: string;
     /** Neon logical size (all databases, inherited + branch-local). */
@@ -81,6 +86,11 @@ export interface ReportOptions {
   branchUrl?: string;
   /** Include Neon's own schema-diff output. Defaults to true in Neon mode. */
   neonDiff?: boolean;
+  /**
+   * Subject project/key. When present, ambient `DATABASE_URL` shortcuts and
+   * ambient Neon credentials are never reused.
+   */
+  context?: NeonContext;
 }
 
 interface ReportContext {
@@ -89,6 +99,7 @@ interface ReportContext {
   branchUrl: string;
   baseUrl: string;
   mode: "neon" | "direct";
+  database?: string;
 }
 
 async function resolveContext(options: ReportOptions): Promise<ReportContext> {
@@ -108,7 +119,7 @@ async function resolveContext(options: ReportOptions): Promise<ReportContext> {
   }
 
   const parentName = options.parent ?? parentBranchName();
-  const branches = await listBranches();
+  const branches = await listBranches(options.context);
   const branchMeta = branches.find((branch) => branch.name === branchName);
   const parentMeta = branches.find((branch) => branch.name === parentName);
 
@@ -125,17 +136,25 @@ async function resolveContext(options: ReportOptions): Promise<ReportContext> {
   }
 
   // If the local env already points at one of the two branches, reuse it
-  // instead of paying for another Neon CLI round trip.
+  // instead of paying for another Neon CLI round trip. A subject context must
+  // never take this shortcut: the local env belongs to Aikya, not the subject.
   const envBranch = process.env.NEON_BRANCH;
   const envUrl = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+  const canReuseEnv = !options.context;
 
   const [branchUrl, baseUrl] = await Promise.all([
-    envBranch === branchName && envUrl
+    canReuseEnv && envBranch === branchName && envUrl
       ? envUrl
-      : branchConnectionString(branchName, { pooled: true }),
-    envBranch === parentName && envUrl
+      : branchConnectionString(branchName, {
+          pooled: true,
+          context: options.context,
+        }),
+    canReuseEnv && envBranch === parentName && envUrl
       ? envUrl
-      : branchConnectionString(parentName, { pooled: true }),
+      : branchConnectionString(parentName, {
+          pooled: true,
+          context: options.context,
+        }),
   ]);
 
   return {
@@ -144,6 +163,7 @@ async function resolveContext(options: ReportOptions): Promise<ReportContext> {
     parentMeta,
     branchUrl,
     baseUrl,
+    database: options.context ? defaultDatabaseName(options.context) : undefined,
   };
 }
 
@@ -197,7 +217,7 @@ export async function buildBranchReport(
 
     const neonDiff =
       context.mode === "neon" && options.neonDiff === true
-        ? await neonSchemaDiff(parentName, branchName)
+        ? await neonSchemaDiff(parentName, branchName, options.context)
         : null;
 
     const branchLogicalSize = context.branchMeta?.logicalSize;
@@ -228,6 +248,8 @@ export async function buildBranchReport(
       branch: {
         name: branchName,
         id: context.branchMeta?.id,
+        projectId: context.branchMeta?.projectId,
+        database: context.database,
         state: context.branchMeta?.currentState,
         createdAt: context.branchMeta?.createdAt,
         logicalSizeBytes: branchLogicalSize,
@@ -237,6 +259,7 @@ export async function buildBranchReport(
       parent: {
         name: parentName,
         id: context.parentMeta?.id,
+        projectId: context.parentMeta?.projectId,
         state: context.parentMeta?.currentState,
         createdAt: context.parentMeta?.createdAt,
         logicalSizeBytes: parentLogicalSize,
@@ -264,6 +287,12 @@ export function printBranchReport(report: BranchReport): void {
   console.log(bold(paint("cyan", "Database branch report")));
   console.log(line);
   console.log(`Branch      ${bold(report.branch.name)}${report.branch.id ? dim(` (${report.branch.id})`) : ""}`);
+  if (report.branch.projectId) {
+    console.log(`Project     ${report.branch.projectId}`);
+  }
+  if (report.branch.database) {
+    console.log(`Database    ${report.branch.database}`);
+  }
   console.log(`State       ${report.branch.state ?? "n/a"}`);
   console.log(`Parent      ${report.parent.name}`);
   console.log(`Created     ${formatDate(report.branch.createdAt)}`);

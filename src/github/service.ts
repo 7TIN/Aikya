@@ -1,6 +1,15 @@
+import type { SubjectPreviewConfig } from "../ci/preview.ts";
+import {
+  loadRepoRegistry,
+  readEnvFile,
+  requireSubjectRepo,
+  resolveSubjectNeonContext,
+  type RepoRegistry,
+} from "../preview/registry.ts";
 import { parseRepos } from "./client.ts";
 import {
   emptyMonitorState,
+  failedSyncSummary,
   loadMonitorState,
   saveMonitorState,
   syncRepository,
@@ -17,6 +26,10 @@ export interface WatchConfig {
   runTests: boolean;
   retryMs?: number;
   statePath?: string;
+  /** Override the committed preview registry (tests / alternate installs). */
+  registryPath?: string;
+  /** Override the gitignored local registry. */
+  localRegistryPath?: string;
 }
 
 export interface WatchPullRequest extends TrackedPullRequest {
@@ -90,6 +103,8 @@ export function resolveWatchConfig(
     runTests: env.GITHUB_WATCH_TESTS !== "false",
     retryMs: parseRetryMs(env.GITHUB_WATCH_RETRY_MS),
     statePath: env.GITHUB_WATCH_STATE || undefined,
+    registryPath: env.AIKYA_REPO_REGISTRY || undefined,
+    localRegistryPath: env.AIKYA_LOCAL_REPO_REGISTRY || undefined,
   };
 }
 
@@ -102,6 +117,7 @@ export function resolveWatchConfig(
  */
 export class WatchService {
   private state: MonitorState = emptyMonitorState();
+  private registry: RepoRegistry = { repos: new Map(), warnings: [] };
   private timer: ReturnType<typeof setInterval> | null = null;
   private syncing = false;
   private lastRunAt: string | null = null;
@@ -114,6 +130,13 @@ export class WatchService {
   async init(): Promise<void> {
     if (this.initialized) return;
     this.state = await loadMonitorState(this.config.statePath);
+    this.registry = await loadRepoRegistry({
+      path: this.config.registryPath,
+      localPath: this.config.localRegistryPath,
+    });
+    for (const warning of this.registry.warnings) {
+      console.warn(`[watch] registry: ${warning}`);
+    }
     this.initialized = true;
 
     for (const repo of this.config.repos) {
@@ -122,6 +145,26 @@ export class WatchService {
         this.lastRunAt = lastSyncAt;
       }
     }
+  }
+
+  /**
+   * Resolve one watched repo's own project, key, checkout, and env. A missing
+   * registry entry or key throws; the caller records the failure instead of
+   * falling back to Aikya's project.
+   */
+  private async subjectFor(repo: string): Promise<SubjectPreviewConfig> {
+    const entry = requireSubjectRepo(this.registry, repo);
+    const neon = resolveSubjectNeonContext(entry);
+
+    return {
+      repo: entry.repo,
+      neon,
+      source: entry.source,
+      parent: entry.parent,
+      env: entry.envFrom ? await readEnvFile(entry.envFrom) : undefined,
+      steps: entry.steps,
+      stepTimeoutMs: entry.stepTimeoutMs,
+    };
   }
 
   async start(): Promise<void> {
@@ -153,11 +196,30 @@ export class WatchService {
       const summaries: SyncSummary[] = [];
 
       for (const repo of this.config.repos) {
+        let subject: SubjectPreviewConfig;
+        try {
+          subject = await this.subjectFor(repo);
+        } catch (error) {
+          const message = errorMessage(error);
+          const repoState = (this.state.repos[repo] ??= {
+            lastSyncAt: null,
+            lastError: null,
+            pullRequests: {},
+          });
+          repoState.lastError = message;
+          repoState.lastSyncAt = new Date().toISOString();
+          summaries.push(failedSyncSummary(repo, message));
+          console.error(`[watch] ${repo} configuration error: ${message}`);
+          await saveMonitorState(this.state, this.config.statePath);
+          continue;
+        }
+
         const summary = await syncRepository({
           repo,
           state: this.state,
           parent: this.config.parent,
           runTests: this.config.runTests,
+          subject,
           retryMs: this.config.retryMs,
           log: (line) => console.log(`[watch] ${repo} ${line}`),
         });

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { PreviewEvent } from "../ci/events.ts";
-import type { PreviewOptions, PreviewResult } from "../ci/preview.ts";
+import type {
+  PreviewOptions,
+  PreviewResult,
+  SubjectPreviewConfig,
+} from "../ci/preview.ts";
 import type { GithubPullRequest } from "./client.ts";
 import {
   artifactDirFor,
@@ -28,6 +32,8 @@ function pullRequest(
     author: "octocat",
     headSha: "abc1234",
     headRef: "feature",
+    headRepo: "7TIN/gh-lab",
+    headIsFork: false,
     baseRef: "main",
     createdAt: "2026-11-04T09:00:00Z",
     updatedAt: "2026-11-04T09:30:00Z",
@@ -188,6 +194,7 @@ interface Harness {
       now?: number;
       failFetch?: boolean;
       status?: PreviewResult["status"];
+      subject?: SubjectPreviewConfig;
     },
   ) => ReturnType<typeof syncRepository>;
 }
@@ -201,6 +208,7 @@ function harness(): Harness {
       repo: "7TIN/gh-lab",
       state,
       runTests: false,
+      subject: options.subject,
       artifactsDir: () => "/tmp/db-branch-test-artifacts",
       deps: {
         now: () => options.now ?? NOW,
@@ -242,6 +250,65 @@ describe("syncRepository", () => {
     const entry = test.state.repos["7TIN/gh-lab"]?.pullRequests["7"];
     expect(entry?.status).toBe("ready");
     expect(entry?.headSha).toBe("abc1234");
+  });
+
+  test("skips a fork PR without running the preview", async () => {
+    const test = harness();
+    const summary = await test.sync([
+      pullRequest({ headRepo: "fork/gh-lab", headIsFork: true }),
+    ]);
+
+    expect(summary.unchanged).toBe(1);
+    expect(summary.created).toBe(0);
+    expect(test.calls).toHaveLength(0);
+    expect(test.state.repos["7TIN/gh-lab"]?.pullRequests["7"]).toMatchObject({
+      headSha: "abc1234",
+      status: "skipped",
+      error: null,
+    });
+    expect(summary.pullRequests[0]).toMatchObject({
+      number: 7,
+      action: "skip",
+      status: "skipped",
+      error: expect.stringContaining("fork head"),
+    });
+  });
+
+  test("skips a PR whose head repository is unknown", async () => {
+    const test = harness();
+    const summary = await test.sync([
+      pullRequest({ headRepo: null, headIsFork: true }),
+    ]);
+
+    expect(summary.unchanged).toBe(1);
+    expect(test.calls).toHaveLength(0);
+    expect(summary.pullRequests[0]?.error).toContain("unknown");
+  });
+
+  test("passes the subject project, source, parent, and PR head SHA to the preview", async () => {
+    const test = harness();
+    const subject: SubjectPreviewConfig = {
+      repo: "7TIN/gh-lab",
+      neon: { projectId: "subject-project", database: "neondb" },
+      source: "C:/fixtures/gh-lab",
+      parent: "trunk",
+    };
+
+    await test.sync([pullRequest({ headSha: "deadbeef" })], { subject });
+
+    expect(test.calls[0]?.parent).toBe("trunk");
+    expect(test.calls[0]?.subject).toMatchObject({
+      repo: "7TIN/gh-lab",
+      source: "C:/fixtures/gh-lab",
+      parent: "trunk",
+      ref: "deadbeef",
+      neon: { projectId: "subject-project", database: "neondb" },
+    });
+
+    await test.sync([], { subject });
+    expect(test.calls[1]?.event).toBe("closed");
+    expect(test.calls[1]?.parent).toBe("trunk");
+    expect(test.calls[1]?.subject?.ref).toBe("deadbeef");
   });
 
   test("skips an unchanged pull request", async () => {

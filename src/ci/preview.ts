@@ -15,8 +15,15 @@ import {
   deleteBranch,
   listBranches,
 } from "../neon/branches.ts";
-import { parentBranchName } from "../neon/cli.ts";
+import { parentBranchName, type NeonContext } from "../neon/cli.ts";
 import { buildBranchReport, type BranchReport } from "../neon/report.ts";
+import {
+  runSandbox,
+  SANDBOX_STEPS,
+  type SandboxResult,
+  type SandboxStepName,
+  type SandboxStepResult,
+} from "../preview/sandbox.ts";
 import { renderPreviewComment } from "./comment.ts";
 import {
   parsePreviewEvent,
@@ -46,6 +53,8 @@ export interface PreviewStep {
   status: StepStatus;
   detail?: string;
   durationMs?: number;
+  /** Captured sandbox output (subject previews), persisted in report.json. */
+  output?: string;
 }
 
 export interface PreviewTests {
@@ -71,6 +80,34 @@ export interface PreviewSource {
   author?: string;
 }
 
+/**
+ * W2 execution against a watched repository's own checkout and Neon project.
+ * Supplied by the registry; never derived from Aikya's ambient credentials.
+ */
+export interface SubjectPreviewConfig {
+  repo: string;
+  neon: NeonContext;
+  /** Local path or git URL checked out by the sandbox. */
+  source: string;
+  /** PR head SHA or other git ref to check out. */
+  ref?: string | null;
+  parent?: string;
+  /** Extra environment merged into the sandbox; DATABASE_URL wins. */
+  env?: Record<string, string>;
+  steps?: readonly SandboxStepName[];
+  stepTimeoutMs?: number;
+}
+
+/** Subject metadata recorded in the result so artifacts explain what ran. */
+export interface PreviewSubject {
+  repo: string;
+  projectId: string | null;
+  source: string;
+  ref: string | null;
+  parent: string;
+  database: string | null;
+}
+
 export interface PreviewResult {
   pr: number;
   event: PreviewEvent;
@@ -86,6 +123,7 @@ export interface PreviewResult {
   comment: string;
   artifacts?: PreviewArtifacts;
   source?: PreviewSource;
+  subject?: PreviewSubject;
   error?: string;
 }
 
@@ -107,6 +145,8 @@ export interface PreviewOptions {
   artifactsDir?: string;
   /** Origin metadata when the preview is created by the repository watcher. */
   source?: PreviewSource;
+  /** Run the watched repo's own contract instead of Aikya's migrations. */
+  subject?: SubjectPreviewConfig;
   /** Injectable clock for tests. */
   now?: number;
 }
@@ -127,6 +167,66 @@ function displayTail(result: CommandResult): string {
   return commandTail(result, 15);
 }
 
+function tailOf(text: string, lines = 15): string {
+  const all = text.split(/\r?\n/);
+  return all.slice(Math.max(0, all.length - lines)).join("\n");
+}
+
+/** Convert one sandbox step into the preview step shape used by artifacts. */
+function sandboxPreviewStep(entry: SandboxStepResult): PreviewStep {
+  const name = entry.name === "test" ? "tests" : entry.name;
+
+  if (entry.status === "skipped") {
+    return {
+      name,
+      status: "skipped",
+      detail: entry.output || "not configured by the contract",
+      durationMs: entry.durationMs,
+      output: entry.output,
+    };
+  }
+
+  if (entry.status === "failed") {
+    const reason = entry.timedOut
+      ? "timed out"
+      : entry.cancelled
+        ? "cancelled"
+        : entry.exitCode !== null
+          ? `exit ${entry.exitCode}`
+          : "failed";
+    return {
+      name,
+      status: "failed",
+      detail: entry.output ? `${reason}\n${tailOf(entry.output)}` : reason,
+      durationMs: entry.durationMs,
+      output: entry.output,
+    };
+  }
+
+  return {
+    name,
+    status: "ok",
+    detail: entry.exitCode === 0 ? "exit 0" : undefined,
+    durationMs: entry.durationMs,
+    output: entry.output,
+  };
+}
+
+function sandboxTests(result: SandboxResult): PreviewTests | undefined {
+  const test = result.steps.find((entry) => entry.name === "test");
+  if (!test || test.status === "skipped") return undefined;
+
+  const summary = parseTestSummary(test.output);
+  return {
+    ran: true,
+    exitCode: test.exitCode ?? 1,
+    passed: summary.passed,
+    failed: summary.failed,
+    durationMs: test.durationMs,
+    outputTail: tailOf(test.output),
+  };
+}
+
 /**
  * Run the local equivalent of the GitHub Actions preview job:
  *
@@ -134,16 +234,35 @@ function displayTail(result: CommandResult): string {
  *   synchronize    → delete + recreate
  *   closed         → delete
  *
- * Inherits the parent database and applies migrations so the PR's migrations
- * are tested against realistic data. `reset` runs migrate + seed from scratch.
+ * Aikya's own project inherits the parent database and applies Aikya's
+ * migrations. A watched repo (`subject`) instead creates the branch in its own
+ * Neon project and runs the PR checkout's own contract in the W1 sandbox.
  */
 export async function runPreview(options: PreviewOptions): Promise<PreviewResult> {
   const pr = parsePullRequestNumber(options.pr);
   const event = parsePreviewEvent(options.event);
-  const parent = options.parent ?? parentBranchName();
+  const subject = options.subject;
+  if (subject && !options.name) {
+    throw new Error(
+      "A subject preview needs a repo-scoped branch name, for example preview/<owner>-<repo>-pr-<n>.",
+    );
+  }
+
+  const parent = options.parent ?? subject?.parent ?? parentBranchName();
   const branch = previewBranchName(pr, options.name);
   const plan = planPreview(event, { fork: options.fork });
   const steps: PreviewStep[] = [];
+
+  const subjectMetadata: PreviewSubject | undefined = subject
+    ? {
+        repo: subject.repo,
+        projectId: subject.neon.projectId ?? null,
+        source: subject.source,
+        ref: subject.ref ?? null,
+        parent,
+        database: subject.neon.database ?? null,
+      }
+    : undefined;
 
   const base = {
     pr,
@@ -155,6 +274,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
     steps,
     comment: "",
     source: options.source,
+    subject: subjectMetadata,
   } satisfies Partial<PreviewResult> & Pick<PreviewResult, "pr" | "event" | "action" | "branch" | "parent" | "reason" | "steps">;
 
   if (plan.action === "skip") {
@@ -171,7 +291,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
 
   let branches: Awaited<ReturnType<typeof listBranches>>;
   try {
-    branches = await listBranches();
+    branches = await listBranches(subject?.neon);
   } catch (error) {
     const message = errorMessage(error);
     return finalize(
@@ -216,7 +336,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
 
     try {
       const startedAt = Date.now();
-      await deleteBranch(branch);
+      await deleteBranch(branch, subject?.neon);
       steps.push(step("delete branch", "ok", "removed", Date.now() - startedAt));
       return finalize(
         {
@@ -250,7 +370,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
   try {
     if (exists) {
       const startedAt = Date.now();
-      await deleteBranch(branch);
+      await deleteBranch(branch, subject?.neon);
       steps.push(
         step(
           "delete existing branch",
@@ -262,7 +382,12 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
     }
 
     const startedAt = Date.now();
-    await createBranch({ name: branch, parent, expiresAt });
+    await createBranch({
+      name: branch,
+      parent,
+      expiresAt,
+      context: subject?.neon,
+    });
     steps.push(
       step(
         "create branch",
@@ -272,7 +397,10 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
       ),
     );
 
-    branchUrl = await branchConnectionString(branch, { pooled: false });
+    branchUrl = await branchConnectionString(branch, {
+      pooled: false,
+      context: subject?.neon,
+    });
   } catch (error) {
     const message = errorMessage(error);
     steps.push(step("create branch", "failed", message));
@@ -288,91 +416,124 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
     );
   }
 
-  const env = {
-    DATABASE_URL: branchUrl,
-    DATABASE_URL_UNPOOLED: branchUrl,
-    NEON_BRANCH: branch,
-  };
-  const secrets = [branchUrl];
-
   let failed = false;
   let tests: PreviewTests | undefined;
+  let processError: string | undefined;
 
-  // Inherit + migrate by default; --reset replaces the schema and reseeds.
-  const prepareScript = options.reset
-    ? "src/db/reset.ts"
-    : "src/db/migrate.ts";
-  const prepareName = options.reset ? "reset (migrate + seed)" : "migrate";
+  if (subject) {
+    // A watched repo runs its own checkout. DATABASE_URL is written last so a
+    // subject env file can never redirect the run to a different branch.
+    const env = {
+      ...(subject.env ?? {}),
+      DATABASE_URL: branchUrl,
+      DATABASE_URL_UNPOOLED: branchUrl,
+      NEON_BRANCH: branch,
+    };
+    const requested = [...(subject.steps ?? SANDBOX_STEPS)];
+    if (options.runTests === false && requested.includes("test")) {
+      requested.splice(requested.indexOf("test"), 1);
+    }
 
-  const prepare = await runCommand([process.execPath, "run", prepareScript], {
-    cwd: ROOT,
-    env,
-    secrets,
-  });
+    const sandbox = await runSandbox({
+      source: subject.source,
+      ref: subject.ref ?? undefined,
+      steps: requested,
+      stepTimeoutMs: subject.stepTimeoutMs,
+      env,
+    });
 
-  if (prepare.exitCode === 0) {
-    steps.push(
-      step(
-        prepareName,
-        "ok",
-        options.reset ? "schema dropped and reseeded" : "migrations applied",
-        prepare.durationMs,
-      ),
-    );
+    steps.push(...sandbox.steps.map(sandboxPreviewStep));
+    tests = sandboxTests(sandbox);
+    failed = !sandbox.ok;
+    processError = sandbox.error ?? undefined;
   } else {
-    failed = true;
-    steps.push(
-      step(prepareName, "failed", displayTail(prepare), prepare.durationMs),
-    );
-  }
+    const env = {
+      DATABASE_URL: branchUrl,
+      DATABASE_URL_UNPOOLED: branchUrl,
+      NEON_BRANCH: branch,
+    };
+    const secrets = [branchUrl];
 
-  if (options.runTests !== false && !failed) {
-    const testsResult = await runCommand([process.execPath, "test"], {
+    // Inherit + migrate by default; --reset replaces the schema and reseeds.
+    const prepareScript = options.reset
+      ? "src/db/reset.ts"
+      : "src/db/migrate.ts";
+    const prepareName = options.reset ? "reset (migrate + seed)" : "migrate";
+
+    const prepare = await runCommand([process.execPath, "run", prepareScript], {
       cwd: ROOT,
       env,
       secrets,
     });
-    const summary = parseTestSummary(`${testsResult.stdout}\n${testsResult.stderr}`);
-    tests = {
-      ran: true,
-      exitCode: testsResult.exitCode,
-      passed: summary.passed,
-      failed: summary.failed,
-      durationMs: testsResult.durationMs,
-      outputTail: displayTail(testsResult),
-    };
 
-    if (testsResult.exitCode === 0) {
+    if (prepare.exitCode === 0) {
       steps.push(
         step(
-          "tests",
+          prepareName,
           "ok",
-          `${formatNumber(tests.passed ?? 0)} passed`,
-          testsResult.durationMs,
+          options.reset ? "schema dropped and reseeded" : "migrations applied",
+          prepare.durationMs,
         ),
       );
     } else {
       failed = true;
       steps.push(
-        step(
-          "tests",
-          "failed",
-          `${formatNumber(tests.failed ?? 0)} failed; ${formatNumber(tests.passed ?? 0)} passed`,
-          testsResult.durationMs,
-        ),
+        step(prepareName, "failed", displayTail(prepare), prepare.durationMs),
       );
     }
-  } else if (options.runTests === false) {
-    steps.push(step("tests", "skipped", "--no-tests"));
-  } else {
-    steps.push(step("tests", "skipped", "preparation failed"));
+
+    if (options.runTests !== false && !failed) {
+      const testsResult = await runCommand([process.execPath, "test"], {
+        cwd: ROOT,
+        env,
+        secrets,
+      });
+      const summary = parseTestSummary(`${testsResult.stdout}\n${testsResult.stderr}`);
+      tests = {
+        ran: true,
+        exitCode: testsResult.exitCode,
+        passed: summary.passed,
+        failed: summary.failed,
+        durationMs: testsResult.durationMs,
+        outputTail: displayTail(testsResult),
+      };
+
+      if (testsResult.exitCode === 0) {
+        steps.push(
+          step(
+            "tests",
+            "ok",
+            `${formatNumber(tests.passed ?? 0)} passed`,
+            testsResult.durationMs,
+          ),
+        );
+      } else {
+        failed = true;
+        steps.push(
+          step(
+            "tests",
+            "failed",
+            `${formatNumber(tests.failed ?? 0)} failed; ${formatNumber(tests.passed ?? 0)} passed`,
+            testsResult.durationMs,
+          ),
+        );
+      }
+    } else if (options.runTests === false) {
+      steps.push(step("tests", "skipped", "--no-tests"));
+    } else {
+      steps.push(step("tests", "skipped", "preparation failed"));
+    }
   }
 
   // The report is best-effort: it still helps debug a failed migration.
   let report: BranchReport | undefined;
   try {
     const startedAt = Date.now();
-    report = await buildBranchReport({ branch, parent });
+    report = await buildBranchReport({
+      branch,
+      parent,
+      context: subject?.neon,
+    });
     steps.push(
       step(
         "report",
@@ -396,6 +557,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
     tests,
     report,
     comment: "",
+    error: processError,
   };
 
   return finalize(result, options.artifactsDir);
@@ -457,6 +619,18 @@ export function printPreviewResult(result: PreviewResult): void {
   console.log(`PR         #${result.pr} (${result.event})`);
   if (result.source?.repo) console.log(`Repo       ${result.source.repo}`);
   if (result.source?.title) console.log(`Title      ${result.source.title}`);
+  if (result.subject) {
+    console.log(`Subject    ${result.subject.repo} ${dim("(watched repo contract)")}`);
+    if (result.subject.projectId) {
+      console.log(`Project    ${result.subject.projectId}`);
+    }
+    if (result.subject.database) {
+      console.log(`Database   ${result.subject.database}`);
+    }
+    if (result.subject.ref) {
+      console.log(`Commit     ${result.subject.ref.slice(0, 12)}`);
+    }
+  }
   console.log(`Status     ${icon[result.status]} ${result.status.toUpperCase()}`);
   console.log(`Branch     ${bold(result.branch)} ${dim(`(parent ${result.parent})`)}`);
   if (result.expiresAt) console.log(`Expires    ${result.expiresAt}`);

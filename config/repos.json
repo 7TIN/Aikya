@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repos": [
+    {
+      "repo": "7TIN/gh-lab",
+      "projectId": "flat-resonance-58366530",
+      "parent": "main",
+      "apiKeyEnv": "NEON_API_KEY",
+      "database": "neondb",
+      "stepTimeoutMs": 600000
+    }
+  ]
+}
