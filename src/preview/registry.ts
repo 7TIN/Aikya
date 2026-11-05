@@ -3,7 +3,11 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseRepo } from "../github/client.ts";
 import type { NeonContext } from "../neon/cli.ts";
-import { SANDBOX_STEPS, type SandboxStepName } from "./sandbox.ts";
+import {
+  SANDBOX_STEPS,
+  type SandboxBackend,
+  type SandboxStepName,
+} from "./sandbox.ts";
 
 /**
  * Workstream W2: tell Aikya which Neon project and credential belong to each
@@ -48,6 +52,18 @@ export interface SubjectRepoConfig {
    * split migrate/test credentials.
    */
   role?: string;
+  /** Execution backend. Defaults to `local`. Use `vercel` after live verification. */
+  backend: SandboxBackend;
+  /** vCPU count for the Vercel backend. */
+  vcpus?: number;
+  /** Vercel region for the Vercel backend. */
+  region?: string;
+  /** Vercel image reference. */
+  image?: string;
+  /** Vercel network policy. */
+  networkPolicy?: "allow-all" | "deny-all";
+  /** Vercel sandbox TTL in milliseconds. */
+  sandboxTimeoutMs?: number;
 }
 
 export interface RepoRegistry {
@@ -119,7 +135,53 @@ const KNOWN_KEYS = new Set([
   "stepTimeoutMs",
   "steps",
   "role",
+  "backend",
+  "vcpus",
+  "region",
+  "image",
+  "networkPolicy",
+  "sandboxTimeoutMs",
 ]);
+
+function parsePositiveInteger(
+  value: unknown,
+  field: string,
+  file: string,
+): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value <= 0
+  ) {
+    throw new Error(`${file}: ${field} must be a positive integer.`);
+  }
+  return value;
+}
+
+function parseBackend(
+  value: unknown,
+  file: string,
+  repo: string,
+): SandboxBackend | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value === "local" || value === "vercel") return value;
+  throw new Error(
+    `${file}: repos[${repo}].backend must be "local" or "vercel".`,
+  );
+}
+
+function parseNetworkPolicy(
+  value: unknown,
+  file: string,
+  repo: string,
+): "allow-all" | "deny-all" | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value === "allow-all" || value === "deny-all") return value;
+  throw new Error(
+    `${file}: repos[${repo}].networkPolicy must be "allow-all" or "deny-all".`,
+  );
+}
 
 function parseSteps(value: unknown, file: string, repo: string): SandboxStepName[] | undefined {
   if (value === undefined || value === null) return undefined;
@@ -194,20 +256,27 @@ function parseEntry(
     : `https://github.com/${normalized}.git`;
 
   const envFrom = nonEmptyString(raw.envFrom, "envFrom", file);
-
-  let stepTimeoutMs: number | undefined;
-  if (raw.stepTimeoutMs !== undefined && raw.stepTimeoutMs !== null) {
-    if (
-      typeof raw.stepTimeoutMs !== "number" ||
-      !Number.isInteger(raw.stepTimeoutMs) ||
-      raw.stepTimeoutMs <= 0
-    ) {
-      throw new Error(
-        `${file}: repos[${normalized}].stepTimeoutMs must be a positive integer.`,
-      );
-    }
-    stepTimeoutMs = raw.stepTimeoutMs;
-  }
+  const stepTimeoutMs = parsePositiveInteger(
+    raw.stepTimeoutMs,
+    `repos[${normalized}].stepTimeoutMs`,
+    file,
+  );
+  const vcpus = parsePositiveInteger(
+    raw.vcpus,
+    `repos[${normalized}].vcpus`,
+    file,
+  );
+  const sandboxTimeoutMs = parsePositiveInteger(
+    raw.sandboxTimeoutMs,
+    `repos[${normalized}].sandboxTimeoutMs`,
+    file,
+  );
+  const backend = parseBackend(raw.backend, file, normalized) ?? "local";
+  const networkPolicy = parseNetworkPolicy(
+    raw.networkPolicy,
+    file,
+    normalized,
+  );
 
   const apiKeyEnv =
     raw.apiKeyEnv === null
@@ -227,6 +296,12 @@ function parseEntry(
       stepTimeoutMs,
       steps: parseSteps(raw.steps, file, normalized),
       role: nonEmptyString(raw.role, "role", file) ?? undefined,
+      backend,
+      vcpus,
+      region: nonEmptyString(raw.region, "region", file) ?? undefined,
+      image: nonEmptyString(raw.image, "image", file) ?? undefined,
+      networkPolicy,
+      sandboxTimeoutMs,
     },
     warnings,
   };

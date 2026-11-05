@@ -4,6 +4,7 @@ import { bold, dim, paint } from "../lib/format.ts";
 import {
   runSandbox,
   SANDBOX_STEPS,
+  type SandboxOptions,
   type SandboxStepName,
 } from "../preview/sandbox.ts";
 
@@ -14,6 +15,15 @@ const stepsFlag = flagString(flags, "steps");
 const timeoutFlag = flagString(flags, "timeout");
 const maxOutputFlag = flagString(flags, "max-output");
 const envFlag = flagString(flags, "env");
+const backendFlag = flagString(flags, "backend") ?? "local";
+const vcpusFlag = flagString(flags, "vcpus");
+const region = flagString(flags, "region");
+const image = flagString(flags, "image");
+const networkPolicy = flagString(flags, "network-policy") as
+  | "allow-all"
+  | "deny-all"
+  | undefined;
+const sandboxTimeoutFlag = flagString(flags, "sandbox-timeout");
 const keep = flagBool(flags, "keep");
 const json = flagBool(flags, "json");
 
@@ -24,6 +34,46 @@ function fail(error: unknown): never {
   );
   console.error("");
   process.exit(1);
+}
+
+if (!["local", "vercel"].includes(backendFlag)) {
+  fail(new Error('--backend must be "local" or "vercel".'));
+}
+
+let vercel: SandboxOptions["vercel"] | undefined;
+if (backendFlag === "vercel") {
+  if (keep) {
+    fail(new Error("--keep applies only to the local backend."));
+  }
+
+  let vcpus: number | undefined;
+  if (vcpusFlag) {
+    if (!/^\d+$/.test(vcpusFlag) || Number(vcpusFlag) <= 0) {
+      fail(new Error("--vcpus must be a positive integer."));
+    }
+    vcpus = Number(vcpusFlag);
+  }
+
+  if (
+    networkPolicy &&
+    networkPolicy !== "allow-all" &&
+    networkPolicy !== "deny-all"
+  ) {
+    fail(new Error("--network-policy must be allow-all or deny-all."));
+  }
+
+  let sandboxTimeoutMs: number | undefined;
+  if (sandboxTimeoutFlag) {
+    try {
+      sandboxTimeoutMs = /^\d+$/.test(sandboxTimeoutFlag)
+        ? Number(sandboxTimeoutFlag)
+        : parseDuration(sandboxTimeoutFlag);
+    } catch (error) {
+      fail(error);
+    }
+  }
+
+  vercel = { vcpus, region, image, networkPolicy, sandboxTimeoutMs };
 }
 
 if (!source) {
@@ -85,12 +135,14 @@ if (envFlag) {
 
 const result = await runSandbox({
   source,
+  backend: backendFlag as SandboxOptions["backend"],
   ref,
   steps,
   stepTimeoutMs,
   maxOutputChars,
   env,
   keepDir: keep,
+  vercel,
   log: json ? undefined : (line) => console.error(dim(line)),
 });
 
@@ -101,6 +153,7 @@ if (json) {
   console.log(bold(paint("cyan", "Sandbox run")));
   console.log("─".repeat(72));
   console.log(`source      ${result.source}`);
+  console.log(`backend     ${result.backend}`);
   console.log(`ref         ${result.ref ?? dim("(default)")}`);
   if (result.contract) {
     console.log(

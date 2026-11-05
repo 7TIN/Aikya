@@ -87,6 +87,7 @@ function statusDetails(result: PreviewResult): string[] {
   }
   if (result.subject) {
     lines.push(`| Subject repo | \`${mdCell(result.subject.repo)}\` |`);
+    lines.push(`| Runner | \`${mdCell(result.subject.backend)}\` |`);
     if (result.subject.projectId) {
       lines.push(`| Neon project | \`${mdCell(result.subject.projectId)}\` |`);
     }

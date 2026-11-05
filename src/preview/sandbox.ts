@@ -37,9 +37,13 @@ export interface SandboxStepResult {
   output: string;
 }
 
+export type SandboxBackend = "local" | "vercel";
+
 export interface SandboxOptions {
   /** Local directory or git URL. */
   source: string;
+  /** Execution backend. Defaults to `local`. */
+  backend?: SandboxBackend;
   /** Git ref (SHA, branch, or `refs/pull/<n>/merge`) checked out before resolving. */
   ref?: string;
   /**
@@ -55,12 +59,31 @@ export interface SandboxOptions {
   maxOutputChars?: number;
   /** Explicit environment for the run. Everything else is scrubbed. */
   env?: Record<string, string>;
-  /** Keep the checkout for inspection instead of deleting it. */
+  /** Keep the checkout for inspection instead of deleting it. Local backend only. */
   keepDir?: boolean;
   /** Parent directory for the scratch checkout. Defaults to the OS temp dir. */
   workRoot?: string;
   /** Cooperative cancellation; kills the running step's process tree. */
   signal?: AbortSignal;
+  /**
+   * Vercel backend settings. The source must be a public git URL, or a local
+   * git repository whose origin is a public HTTPS URL. Local directories and
+   * private/SSH remotes fail closed because Vercel cannot clone them.
+   */
+  vercel?: {
+    /** vCPU count. Default: Vercel's default (2). */
+    vcpus?: number;
+    /** Vercel region, e.g. `iad1`. Default: project default or `iad1`. */
+    region?: string;
+    /** Image reference. Default: `vercel/sandbox/universal:latest`. */
+    image?: string;
+    /** Firewall policy. Default: allow-all (required for package registries). */
+    networkPolicy?: "allow-all" | "deny-all";
+    /** Sandbox TTL. Default: 30 minutes. */
+    sandboxTimeoutMs?: number;
+    /** Optional fixed sandbox name. Random names are safer. */
+    name?: string;
+  };
   log?: (line: string) => void;
 }
 
@@ -68,6 +91,8 @@ export interface SandboxResult {
   ok: boolean;
   source: string;
   ref: string | null;
+  /** Backend that executed the run. */
+  backend: SandboxBackend;
   /** Checkout path only when `keepDir` is set; otherwise null after teardown. */
   dir: string | null;
   contract: PreviewContract | null;
@@ -167,7 +192,11 @@ async function runGit(args: string[]): Promise<void> {
   }
 }
 
-async function prepareCheckout(options: SandboxOptions): Promise<{
+/**
+ * Exported for the Vercel backend, which reads the contract before handing
+ * the source to the remote sandbox. Never run repository code here.
+ */
+export async function prepareCheckout(options: SandboxOptions): Promise<{
   parent: string;
   dir: string;
 }> {
@@ -338,7 +367,7 @@ interface RunStepInput {
   signal?: AbortSignal;
 }
 
-function skippedStep(
+export function skippedStep(
   name: SandboxStepName,
   reason: string,
   cancelled = false,
@@ -452,6 +481,13 @@ async function runStep(input: RunStepInput): Promise<SandboxStepResult> {
 export async function runSandbox(
   options: SandboxOptions,
 ): Promise<SandboxResult> {
+  const backend = options.backend ?? "local";
+  if (backend === "vercel") {
+    // Loaded lazily so ordinary local tests don't require the SDK credentials.
+    const { runVercelSandbox } = await import("./vercel.ts");
+    return runVercelSandbox(options);
+  }
+
   const startedAt = Date.now();
   const ref = options.ref?.trim() || null;
   const stepTimeoutMs = options.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
@@ -466,6 +502,7 @@ export async function runSandbox(
     ok: false,
     source: options.source,
     ref,
+    backend,
     dir: null,
     contract,
     steps: [],

@@ -20,6 +20,8 @@ import { buildBranchReport, type BranchReport } from "../neon/report.ts";
 import {
   runSandbox,
   SANDBOX_STEPS,
+  type SandboxBackend,
+  type SandboxOptions,
   type SandboxResult,
   type SandboxStepName,
   type SandboxStepResult,
@@ -96,6 +98,10 @@ export interface SubjectPreviewConfig {
   env?: Record<string, string>;
   steps?: readonly SandboxStepName[];
   stepTimeoutMs?: number;
+  /** Execution backend for the checkout. Defaults to local. */
+  backend?: SandboxBackend;
+  /** Vercel settings when backend is `vercel`. */
+  vercel?: SandboxOptions["vercel"];
 }
 
 /** Subject metadata recorded in the result so artifacts explain what ran. */
@@ -106,6 +112,7 @@ export interface PreviewSubject {
   ref: string | null;
   parent: string;
   database: string | null;
+  backend: SandboxBackend;
 }
 
 export interface PreviewResult {
@@ -261,6 +268,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
         ref: subject.ref ?? null,
         parent,
         database: subject.neon.database ?? null,
+        backend: subject.backend ?? "local",
       }
     : undefined;
 
@@ -436,10 +444,12 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
 
     const sandbox = await runSandbox({
       source: subject.source,
+      backend: subject.backend,
       ref: subject.ref ?? undefined,
       steps: requested,
       stepTimeoutMs: subject.stepTimeoutMs,
       env,
+      vercel: subject.vercel,
     });
 
     steps.push(...sandbox.steps.map(sandboxPreviewStep));
@@ -621,6 +631,7 @@ export function printPreviewResult(result: PreviewResult): void {
   if (result.source?.title) console.log(`Title      ${result.source.title}`);
   if (result.subject) {
     console.log(`Subject    ${result.subject.repo} ${dim("(watched repo contract)")}`);
+    console.log(`Backend    ${result.subject.backend}`);
     if (result.subject.projectId) {
       console.log(`Project    ${result.subject.projectId}`);
     }

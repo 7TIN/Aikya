@@ -155,6 +155,16 @@ export class WatchService {
   private async subjectFor(repo: string): Promise<SubjectPreviewConfig> {
     const entry = requireSubjectRepo(this.registry, repo);
     const neon = resolveSubjectNeonContext(entry);
+    const vercel =
+      entry.backend === "vercel"
+        ? {
+            vcpus: entry.vcpus,
+            region: entry.region,
+            image: entry.image,
+            networkPolicy: entry.networkPolicy,
+            sandboxTimeoutMs: entry.sandboxTimeoutMs,
+          }
+        : undefined;
 
     return {
       repo: entry.repo,
@@ -164,6 +174,8 @@ export class WatchService {
       env: entry.envFrom ? await readEnvFile(entry.envFrom) : undefined,
       steps: entry.steps,
       stepTimeoutMs: entry.stepTimeoutMs,
+      backend: entry.backend,
+      vercel,
     };
   }
 

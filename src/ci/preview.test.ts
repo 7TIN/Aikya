@@ -48,6 +48,7 @@ describe("subject preview planning", () => {
       ref: "abc123",
       parent: "main",
       database: "neondb",
+      backend: "local",
     });
     expect(result.steps[0]).toMatchObject({
       name: "create branch",
@@ -79,6 +80,7 @@ describe("subject preview planning", () => {
         ref: "abc123",
         parent: "main",
         database: "neondb",
+        backend: "local",
       },
       comment: "",
     };

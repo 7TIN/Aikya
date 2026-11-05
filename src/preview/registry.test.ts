@@ -64,6 +64,7 @@ describe("loadRepoRegistry", () => {
       apiKeyEnv: "NEON_API_KEY_7TIN_GH_LAB",
       source: "https://github.com/7TIN/gh-lab.git",
       database: "neondb",
+      backend: "local",
     });
     expect(registry.warnings).toEqual([]);
   });
@@ -111,6 +112,57 @@ describe("loadRepoRegistry", () => {
     expect(findSubjectRepo(registry, "7TIN/gh-lab")?.source).toBe(
       "ssh://git@example.com/team/app.git",
     );
+  });
+
+  test("parses Vercel backend settings without enabling them by default", async () => {
+    const root = await tempDir();
+    const path = join(root, "repos.json");
+    await writeJson(path, {
+      version: 1,
+      repos: [
+        entry({
+          backend: "vercel",
+          vcpus: 4,
+          region: "sin1",
+          networkPolicy: "deny-all",
+          sandboxTimeoutMs: 900000,
+          image: "vercel/sandbox/universal:latest",
+        }),
+      ],
+    });
+
+    const registry = await loadRepoRegistry({
+      path,
+      localPath: join(root, "missing.local.json"),
+    });
+    expect(findSubjectRepo(registry, "7TIN/gh-lab")).toMatchObject({
+      backend: "vercel",
+      vcpus: 4,
+      region: "sin1",
+      networkPolicy: "deny-all",
+      sandboxTimeoutMs: 900_000,
+      image: "vercel/sandbox/universal:latest",
+    });
+  });
+
+  test("rejects invalid Vercel backend settings", async () => {
+    const root = await tempDir();
+    const path = join(root, "repos.json");
+
+    await writeJson(path, [entry({ backend: "remote" })]);
+    await expect(
+      loadRepoRegistry({ path, localPath: join(root, "missing.local.json") }),
+    ).rejects.toThrow(/backend/);
+
+    await writeJson(path, [entry({ networkPolicy: "blocked" })]);
+    await expect(
+      loadRepoRegistry({ path, localPath: join(root, "missing.local.json") }),
+    ).rejects.toThrow(/networkPolicy/);
+
+    await writeJson(path, [entry({ vcpus: 0 })]);
+    await expect(
+      loadRepoRegistry({ path, localPath: join(root, "missing.local.json") }),
+    ).rejects.toThrow(/vcpus/);
   });
 
   test("rejects invalid entries instead of guessing", async () => {
@@ -167,6 +219,7 @@ describe("resolveSubjectNeonContext", () => {
     apiKeyEnv: "SUBJECT_NEON_KEY",
     source: "https://github.com/7TIN/gh-lab.git",
     database: "neondb",
+    backend: "local",
   };
 
   test("returns only the explicit subject project and key", () => {

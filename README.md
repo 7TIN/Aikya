@@ -74,13 +74,13 @@ can keep working independently.
 | `bun run branch:demo` | Create branch → feature SQL → branch data → report |
 | `bun run branch:report --base-url U --branch-url U` | Compare any two databases |
 | `bun run ci:preview --pr <n> --event <event>` | Local PR preview: create/recreate → migrate → test → report |
-| `bun run ci:preview --repo <owner/name> --pr <n> [--ref <sha>]` | Subject-owned preview: branch in the repo's Neon project and run its own contract |
+| `bun run ci:preview --repo <owner/name> --pr <n> [--ref <sha>] [--backend local\|vercel]` | Subject-owned preview: branch in the repo's Neon project and run its own contract |
 | `bun run ci:cleanup --pr <n>` | Delete a preview branch (closed event) |
 | `bun run ci:cleanup --repo <owner/name> --pr <n>` | Delete a watched repo's preview branch |
 | `bun run watch --repo <owner/name>` | One pass over an external repo's open PRs → branches |
 | `bun run watch:loop --repo <owner/name>` | Poll an external repo continuously (default 120s) |
 | `bun run preview:contract --path <repo>` | Resolve a repo's preview contract without executing it (`--json`) |
-| `bun run preview:sandbox --repo <repo>` | Check out a ref and run the contract in a throwaway sandbox (`--steps`, `--ref`, `--keep`, `--json`) |
+| `bun run preview:sandbox --repo <repo>` | Check out a ref and run the contract in a throwaway sandbox (`--backend local\|vercel`, `--steps`, `--ref`, `--keep`, `--json`) |
 
 `branch:demo` also accepts `--parent`, `--reuse`, `--cleanup`, and `--json`.
 
@@ -247,10 +247,10 @@ reserved for Aikya's own GitHub Actions preview. Artifacts land in
 Important boundaries:
 
 - Fork PRs are never executed by the watcher (same-repository heads only; an
-  unknown head repo is also skipped). This local runner is not a security
-  boundary, so fork PRs stay skipped until the hardened container/Vercel
-  Sandbox backend exists. Same-repository PRs run their own contract in the W1
-  sandbox; they inherit no Aikya credentials.
+  unknown head repo is also skipped). Fork execution remains opt-in and blocked
+  until the Vercel Sandbox path is explicitly approved and verified for a
+  repository. Same-repository PRs can use either `local` (default) or the
+  opt-in Vercel backend; they inherit no Aikya credentials.
 - One Neon project/database is shared by all watched repositories for now. Use
   separate projects when this becomes a multi-tenant product.
 - Unauthenticated GitHub API access allows 60 requests/hour per IP, so the
@@ -372,6 +372,64 @@ reduces accidents, but fork PRs stay skipped until the container/Vercel Sandbox
 backend exists. The runner keeps a stable `SandboxResult` so that backend can
 replace only checkout preparation and step execution.
 
+## Vercel Sandbox backend (optional)
+
+The repository runner supports an isolated Vercel Sandbox backend in addition
+to the local lab backend:
+
+```bash
+# Authenticate the Vercel CLI and pull a development OIDC token first.
+vercel link
+vercel env pull
+
+bun run preview:sandbox --backend vercel \
+  --repo https://github.com/owner/repo.git \
+  --ref <sha> --steps test
+
+bun run ci:preview --repo owner/repo --pr 123 --backend vercel
+```
+
+A registry entry can opt in without touching the command line:
+
+```json
+{
+  "repo": "owner/repo",
+  "backend": "vercel",
+  "vcpus": 2,
+  "region": "iad1",
+  "networkPolicy": "allow-all"
+}
+```
+
+Current rules and limitations:
+
+- This is **opt-in**; `local` remains the default until the remote path is
+  verified for your Vercel project.
+- The source must be a **public HTTPS git URL** (or a local git repository
+  with a public HTTPS `origin`). Plain local directories fail closed because
+  Vercel cannot copy them.
+- SSH remotes and credentials embedded in the URL are refused.
+- The sandbox uses `vercel/sandbox/universal` by default (Node.js and Bun are
+  present); override with `image` in the registry.
+- `networkPolicy` defaults to `allow-all` so package registries work. Use
+  `deny-all` only for contracts with no network dependency.
+- The sandbox is created with `persistent: false` and deleted after the run;
+  orphan snapshots are requested for cleanup.
+- No Neon or GitHub credentials are copied into the sandbox. Each command
+  receives only `CI=1`, `AIKYA_SANDBOX=1`, and explicitly injected values such
+  as the branch-scoped `DATABASE_URL`.
+- Per-command output is capped (`--max-output`), and command timeouts kill the
+  process inside the microVM.
+- The remote path still needs a one-off verification with `vercel link` before
+  fork PRs or private repositories can be trusted. Same-repository PRs remain
+  the only supported execution target for now.
+- For private repositories, use a public fork exclusively for testing, or add a
+  credential-brokered network policy after the baseline path is verified.
+
+If Vercel authentication or project linking is missing, the run fails before a
+preview branch is created/verified; it never falls back to running the code on
+the host.
+
 ## Subject-owned previews (W2)
 
 A watched repository is **not** a consumer of Aikya's database. Its preview
@@ -393,9 +451,13 @@ key:
   "apiKeyEnv": "NEON_API_KEY_7TIN_GH_LAB",
   "source": "https://github.com/7TIN/gh-lab.git",
   "database": "neondb",
-  "stepTimeoutMs": 600000
+  "stepTimeoutMs": 600000,
+  "backend": "vercel"
 }
 ```
+
+`backend` is optional and defaults to `local`; use `vercel` only after linking
+Vercel and verifying the run for that repository.
 
 `config/repos.local.json` is gitignored and **replaces** the committed entry for
 the same repo. Use it for local checkouts, a lab project id, or a different
@@ -411,7 +473,12 @@ Rules:
 - `"apiKeyEnv": null` explicitly selects the local Neon CLI login (useful in
   the lab). The child process still has ambient `NEON_API_KEY` removed.
 - `source` may be a local path or a git URL; omitted means the GitHub repo.
-- `steps`, `envFrom`, `database`, and `stepTimeoutMs` are optional.
+- `steps`, `envFrom`, `database`, `stepTimeoutMs`, and the Vercel settings
+  (`vcpus`, `region`, `image`, `networkPolicy`, `sandboxTimeoutMs`) are
+  optional and are ignored by the local backend.
+- `backend` is `local` unless explicitly set to `vercel`. Vercel still refuses
+  plain local directories, private/SSH sources, and credentials embedded in
+  URLs.
 - Relative `source` / `envFrom` paths are resolved from the registry file.
 - `role` is reserved for branch-scoped role minting; it is not applied yet.
 
@@ -423,6 +490,7 @@ changes.
 
 ```bash
 bun run ci:preview --repo 7TIN/gh-lab --pr 123 --ref <sha>
+bun run ci:preview --repo 7TIN/gh-lab --pr 123 --backend vercel
 bun run ci:preview --repo 7TIN/gh-lab --pr 123 --event closed
 ```
 
@@ -434,7 +502,8 @@ all step logs (`report.json` → `steps[].output`) appear in
 What happens inside a run:
 
 1. Create/replace `preview/<owner>-<repo>-pr-<n>` in the **subject** project.
-2. Fetch the PR head into the W1 sandbox.
+2. Fetch the PR head into the selected sandbox backend (`local` by default,
+   or `vercel` when the registry/CLI opts in).
 3. Resolve the contract inside that checkout.
 4. Run the repo's `install`, `migrate`, `seed`, `build`, and `test` against the
    branch's `DATABASE_URL`; every other credential is scrubbed.
@@ -452,6 +521,11 @@ gitignored local fixture in the shared lab project:
 - a deliberately failing migration exited non-zero and was cleaned up;
 - `--event closed` deleted the created branches; only `main`, `qa`, and
   `staging` remain.
+
+The runner also has a Vercel Sandbox backend, selected with
+`--backend vercel` or `"backend": "vercel"` in the registry. It was built and
+unit-tested without calling Vercel; local remains the default until you link a
+Vercel project and explicitly verify the remote path.
 
 The committed registry is deliberately strict. The lab uses a gitignored
 `config/repos.local.json` with `"apiKeyEnv": null` (explicit CLI login) and the

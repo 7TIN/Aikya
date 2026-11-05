@@ -44,6 +44,7 @@
     "typescript": "^7"
   },
   "dependencies": {
+    "@vercel/sandbox": "^3.9.1",
     "drizzle-orm": "^0.45.4",
     "postgres": "^4.0.0"
   }

@@ -332,10 +332,10 @@ with no long-lived secrets.
 
 The local backend is a temp checkout plus a scrubbed-environment subprocess. It
 is deliberately not a security boundary: it reduces accidents, but untrusted
-fork PRs stay skipped until the remote backend exists. **Vercel Sandbox** is the
-chosen remote backend for later; it will replace `prepareCheckout` (create the
-sandbox, clone inside it) and `runStep` (execute there) while keeping the same
-`SandboxResult` shape.
+fork PRs stay skipped until the remote backend is verified. **Vercel Sandbox**
+is the chosen remote backend; it is implemented behind `--backend vercel`,
+keeps the same `SandboxResult` shape, and keeps local as the default until it
+is verified live.
 
 **Tasks**
 
@@ -346,8 +346,10 @@ sandbox, clone inside it) and `runStep` (execute there) while keeping the same
 - [x] Kill the run when the job is cancelled (`AbortSignal`).
 - [x] Capture stdout/stderr and exit codes in the step results.
 - [x] Tear down the checkout in `finally`, even on failure.
-- [ ] Persist step logs as preview artifacts when W2 wires the runner in.
-- [ ] Add the Vercel Sandbox backend and keep this one as the local fallback.
+- [x] Persist step logs in preview artifacts (`report.json` → `steps[].output`).
+- [x] Add the Vercel Sandbox backend behind `--backend vercel` and an opt-in
+      registry entry; local remains the default.
+- [ ] Verify the Vercel backend live after `vercel link`; fail closed until then.
 - [ ] Harden with container/microVM isolation before running fork PRs.
 
 **Acceptance (local):** a fixture repo runs a step in a temp checkout; a failing
@@ -376,6 +378,9 @@ and migrate it with the PR's own migrations.
       configured environment branch (`main` in the shared lab project).
 - [x] Skip fork and unknown-head PRs; the local sandbox is not a security
       boundary, so only same-repository PR code is executed.
+- [x] Add an opt-in `"backend": "vercel"` registry setting (and `--backend`
+      CLI override); unsupported sources fail closed and local remains the
+      default.
 - [x] Run the contract's `migrate` and `seed` inside the W1 sandbox with the
       branch-scoped `DATABASE_URL`.
 - [ ] Mint a branch-scoped role with a short expiry for the run. Deferred: the
@@ -456,8 +461,10 @@ comments keep working; the state file records `headSha` and the sandbox name.
 1. **Manifest path** is `.aikya/preview.yml`; JSON is the zero-YAML fallback.
 2. **Registry** is explicit. A watched repo must be registered; `GITHUB_REPO`
    alone is not enough once the subject owns a Neon project.
-3. **Sandbox first** is a subprocess with a scrubbed env, timeout, and output
-   caps. Container isolation is required before untrusted fork PRs are run.
+3. **Sandbox first** is a local subprocess by default; the Vercel Sandbox
+   backend is wired behind `--backend vercel` but stays off until live
+   verification. Local reduced accident risk, not a security boundary; fork PRs
+   stay skipped until the remote path is explicitly approved.
 4. **Branch parent** is the configured environment branch (`staging` by
    default), pinned to a SHA; `main` is the fallback when no environment exists.
 5. **Fork PRs** stay skipped until the container sandbox and no-secrets policy
@@ -483,7 +490,8 @@ comments keep working; the state file records `headSha` and the sandbox name.
 | 2026-11-05 | W0 | Contract types, manifest parsing, detection, CLI, tests, docs |
 | 2026-11-05 | W1 | Local sandbox: temp checkout, ref checkout, scrubbed env, timeouts, output caps, cancellation, teardown, CLI, tests |
 | 2026-11-06 | W2 | Subject registry, isolated Neon context, subject preview runner, step logs in artifacts, live fixture verification; branch-scoped roles deferred |
-| 2026-11-06 | W3–W4 | Vercel Sandbox backend and W3–W4 not started |
+| 2026-11-06 | W1–W2 | Vercel Sandbox backend added behind `--backend vercel` and opt-in registry entries; unit-tested without live calls; local remains default |
+| 2026-11-06 | W3–W4 | W3 reviewer agent and W4 quotas/retention not started; Vercel backend live verification pending |
 
 ---
 

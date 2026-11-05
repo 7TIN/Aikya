@@ -4,6 +4,7 @@ import {
   runPreview,
   type SubjectPreviewConfig,
 } from "../ci/preview.ts";
+import type { SandboxBackend } from "../preview/sandbox.ts";
 import { parsePullRequestNumber } from "../ci/events.ts";
 import { monitorBranchName } from "../github/monitor.ts";
 import {
@@ -30,6 +31,7 @@ function usage(): never {
       "  --repo <owner/name>  Run the watched repo's own contract in its own Neon project",
       "  --source <path|url>  Override the registry source (local fixture or PR clone)",
       "  --ref <sha|ref>      Checkout override for a subject preview",
+      "  --backend <local|vercel>  Execution backend (registry default: local)",
       "  --parent <branch>    Parent branch (default: NEON_PARENT_BRANCH or main)",
       "  --name <branch>      Branch name override (sanitized)",
       "  --expires-in <dur>   Branch lifetime, default 7d (30s/30m/24h/7d)",
@@ -67,8 +69,16 @@ const runTests = !flagBool(flags, "no-tests");
 const repoFlag = flagString(flags, "repo");
 const sourceFlag = flagString(flags, "source");
 const ref = flagString(flags, "ref");
+const backendFlag = flagString(flags, "backend") as SandboxBackend | undefined;
 
-if (!repoFlag && (sourceFlag || ref)) {
+if (backendFlag && backendFlag !== "local" && backendFlag !== "vercel") {
+  console.error("");
+  console.error('--backend must be "local" or "vercel".');
+  console.error("");
+  process.exit(1);
+}
+
+if (!repoFlag && (sourceFlag || ref || backendFlag)) {
   usage();
 }
 
@@ -84,6 +94,17 @@ if (repoFlag) {
 
     const entry = requireSubjectRepo(registry, repoFlag);
     const neon = resolveSubjectNeonContext(entry);
+    const backend = backendFlag ?? entry.backend;
+    const vercel =
+      backend === "vercel"
+        ? {
+            vcpus: entry.vcpus,
+            region: entry.region,
+            image: entry.image,
+            networkPolicy: entry.networkPolicy,
+            sandboxTimeoutMs: entry.sandboxTimeoutMs,
+          }
+        : undefined;
 
     subject = {
       repo: entry.repo,
@@ -94,6 +115,8 @@ if (repoFlag) {
       env: entry.envFrom ? await readEnvFile(entry.envFrom) : undefined,
       steps: entry.steps,
       stepTimeoutMs: entry.stepTimeoutMs,
+      backend,
+      vercel,
     };
     subjectBranch = monitorBranchName(entry.repo, pr);
   } catch (error) {
