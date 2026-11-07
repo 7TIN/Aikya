@@ -145,6 +145,49 @@ describe("loadRepoRegistry", () => {
     });
   });
 
+  test("parses reviewer settings as opt-in", async () => {
+    const root = await tempDir();
+    const path = join(root, "repos.json");
+    await writeJson(path, {
+      version: 1,
+      repos: [
+        entry({
+          review: {
+            enabled: true,
+            paths: ["/", "health", "/health"],
+            timeoutMs: 45_000,
+          },
+        }),
+      ],
+    });
+
+    const registry = await loadRepoRegistry({
+      path,
+      localPath: join(root, "missing.local.json"),
+    });
+    expect(findSubjectRepo(registry, "7TIN/gh-lab")?.review).toEqual({
+      enabled: true,
+      paths: ["/", "/health"],
+      timeoutMs: 45_000,
+      maxOutputChars: undefined,
+    });
+  });
+
+  test("rejects invalid reviewer settings", async () => {
+    const root = await tempDir();
+    const path = join(root, "repos.json");
+
+    await writeJson(path, [entry({ review: { paths: [] } })]);
+    await expect(
+      loadRepoRegistry({ path, localPath: join(root, "missing.local.json") }),
+    ).rejects.toThrow(/review\.paths/);
+
+    await writeJson(path, [entry({ review: { enabled: "yes" } })]);
+    await expect(
+      loadRepoRegistry({ path, localPath: join(root, "missing.local.json") }),
+    ).rejects.toThrow(/review\.enabled/);
+  });
+
   test("rejects invalid Vercel backend settings", async () => {
     const root = await tempDir();
     const path = join(root, "repos.json");

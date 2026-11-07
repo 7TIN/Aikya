@@ -7,6 +7,9 @@ import {
   sandboxEnv,
   SANDBOX_STEPS,
   skippedStep,
+  type ReviewFinding,
+  type ReviewerOptions,
+  type ReviewerResult,
   type SandboxBackend,
   type SandboxOptions,
   type SandboxResult,
@@ -41,6 +44,8 @@ export interface SandboxClient {
     signal?: AbortSignal;
   }): Promise<SandboxCommandResult>;
   delete(options?: { deleteOrphanSnapshots?: boolean }): Promise<void>;
+  /** Public URL for an exposed port (SDK `sandbox.domain(port)`). */
+  domain?: (port: number) => string;
 }
 
 export type SandboxFactory = (
@@ -52,6 +57,8 @@ export interface VercelSandboxDependencies {
   createSandbox?: SandboxFactory;
   /** Inject contract resolution (tests avoid cloning from a remote). */
   resolveContract?: (source: string, ref: string | null) => Promise<PreviewContract>;
+  /** Inject HTTP probing (tests avoid the network). */
+  reviewFetch?: typeof fetch;
 }
 
 const DEFAULT_SANDBOX_TIMEOUT_MS = 30 * 60_000;
@@ -219,6 +226,304 @@ function defaultStepEnv(options: SandboxOptions): Record<string, string> {
   };
 }
 
+const DEFAULT_REVIEW_TIMEOUT_MS = 90_000;
+const DEFAULT_REVIEW_PATHS = ["/", "/health"] as const;
+const REVIEW_APP_LOG = "/tmp/aikya-review-app.log";
+const REVIEW_DB_SCRIPT = "/tmp/aikya-review-db.ts";
+
+function reviewBudget(options: SandboxOptions): { timeoutMs: number; maxOutputChars: number } {
+  return {
+    timeoutMs: options.review?.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS,
+    maxOutputChars: options.review?.maxOutputChars ?? 5_000,
+  };
+}
+
+function skippedReview(
+  reason: string,
+  budget: { timeoutMs: number; maxOutputChars: number },
+): ReviewerResult {
+  return {
+    ran: false,
+    status: "skipped",
+    reason,
+    appUrl: null,
+    appPort: null,
+    findings: [],
+    durationMs: 0,
+    budget,
+  };
+}
+
+function normalizePaths(paths: string[] | undefined): string[] {
+  const raw = paths?.length ? paths : [...DEFAULT_REVIEW_PATHS];
+  const unique: string[] = [];
+  for (const path of raw) {
+    const normalized = path.startsWith("/") ? path : `/${path}`;
+    if (!unique.includes(normalized)) unique.push(normalized);
+  }
+  return unique;
+}
+
+async function runReviewCommand(
+  sandbox: SandboxClient,
+  command: string,
+  env: Record<string, string>,
+  cwd: string,
+  timeoutMs: number,
+  maxOutputChars: number,
+  signal?: AbortSignal,
+): Promise<{ exitCode: number; output: string }> {
+  const result = await sandbox.runCommand({
+    cmd: "sh",
+    args: ["-c", command],
+    cwd,
+    env,
+    timeoutMs,
+    signal,
+  });
+  return {
+    exitCode: result.exitCode,
+    output: await doubleCapOutput(result, maxOutputChars),
+  };
+}
+
+async function waitForApp(
+  fetchImpl: typeof fetch,
+  baseUrl: string,
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  while (Date.now() < deadline && !signal?.aborted) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4_000);
+      try {
+        await fetchImpl(baseUrl, { signal: controller.signal });
+        return true;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      await Bun.sleep(1_000);
+    }
+  }
+  return false;
+}
+
+/**
+ * Deterministic reviewer explorer. Runs only inside the Vercel sandbox after
+ * the deterministic steps pass. It can start the app, probe HTTP endpoints,
+ * run one read-only schema query, and capture capped app logs. It never calls
+ * Neon or GitHub management APIs and never changes the step outcome.
+ */
+async function runReviewer(input: {
+  sandbox: SandboxClient;
+  contract: PreviewContract | null;
+  env: Record<string, string>;
+  cwd: string;
+  options: SandboxOptions;
+  dependencies: VercelSandboxDependencies;
+  stepsOk: boolean;
+}): Promise<ReviewerResult | undefined> {
+  const { sandbox, contract, env, cwd, options, dependencies, stepsOk } = input;
+  const reviewOptions = options.review;
+  if (!reviewOptions?.enabled) return undefined;
+
+  const budget = reviewBudget(options);
+  const startedAt = Date.now();
+  const deadline = startedAt + budget.timeoutMs;
+  const remaining = () => Math.max(0, deadline - Date.now());
+
+  if (!stepsOk) return skippedReview("deterministic steps failed", budget);
+  if (!contract?.app) return skippedReview("contract has no app command", budget);
+  if (options.signal?.aborted) return skippedReview("run was cancelled", budget);
+  if (!sandbox.domain) {
+    return skippedReview("sandbox does not expose app domains", budget);
+  }
+
+  const app = contract.app;
+  const findings: ReviewFinding[] = [];
+  const fetchImpl = dependencies.reviewFetch ?? fetch;
+  let appUrl: string | null = null;
+  let appPid: string | null = null;
+
+  const finish = (status: ReviewerResult["status"], reason?: string): ReviewerResult => ({
+    ran: true,
+    status,
+    reason,
+    appUrl,
+    appPort: app.port,
+    findings,
+    durationMs: Date.now() - startedAt,
+    budget,
+  });
+
+  try {
+    appUrl = sandbox.domain(app.port);
+
+    const start = await runReviewCommand(
+      sandbox,
+      `nohup ${app.command} > ${REVIEW_APP_LOG} 2>&1 & echo $!`,
+      env,
+      cwd,
+      Math.min(15_000, remaining()),
+      1_000,
+      options.signal,
+    );
+    appPid = start.output.trim().split(/\s+/).at(0) ?? null;
+
+    findings.push({
+      kind: "app",
+      title: "Start preview app",
+      status: start.exitCode === 0 && appPid ? "ok" : "failed",
+      detail: start.exitCode === 0 && appPid ? `pid ${appPid}` : start.output || "process did not report a pid",
+    });
+
+    if (start.exitCode !== 0 || !appPid) {
+      findings.push({
+        kind: "app",
+        title: "App readiness",
+        status: "skipped",
+        detail: "app process did not start",
+      });
+    } else {
+      const ready = await waitForApp(fetchImpl, appUrl, Math.min(deadline, Date.now() + 30_000), options.signal);
+      findings.push({
+        kind: "app",
+        title: "App readiness",
+        status: ready ? "ok" : "failed",
+        detail: ready ? `responded on port ${app.port}` : "no HTTP response before the readiness deadline",
+      });
+    }
+
+    if (appUrl) {
+      for (const path of normalizePaths(reviewOptions.paths)) {
+        if (remaining() <= 0) {
+          findings.push({ kind: "http", title: `GET ${path}`, status: "skipped", detail: "reviewer budget exhausted" });
+          continue;
+        }
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), Math.min(5_000, remaining()));
+          let response: Response;
+          try {
+            response = await fetchImpl(`${appUrl}${path}`, { signal: controller.signal });
+          } finally {
+            clearTimeout(timer);
+          }
+          const body = await response.text().catch(() => "");
+          findings.push({
+            kind: "http",
+            title: `GET ${path}`,
+            status: response.status < 400 ? "ok" : "failed",
+            detail: `HTTP ${response.status}`,
+            evidence: capOutput(body.trim(), budget.maxOutputChars) || undefined,
+          });
+        } catch (error) {
+          findings.push({
+            kind: "http",
+            title: `GET ${path}`,
+            status: "failed",
+            detail: errorMessage(error),
+          });
+        }
+      }
+    }
+
+    if (contract.database.required && env.DATABASE_URL) {
+      const dbCommand = [
+        `cat > ${REVIEW_DB_SCRIPT} <<'EOF'`,
+        "const sql = new Bun.SQL(process.env.DATABASE_URL);",
+        "const rows = await sql`select table_name from information_schema.tables where table_schema='public' order by table_name limit 20`;",
+        "console.log(JSON.stringify(rows));",
+        "await sql.end();",
+        "EOF",
+        `bun run ${REVIEW_DB_SCRIPT}`,
+      ].join("\n");
+
+      try {
+        const db = await runReviewCommand(
+          sandbox,
+          dbCommand,
+          env,
+          cwd,
+          Math.min(15_000, remaining()),
+          budget.maxOutputChars,
+          options.signal,
+        );
+        findings.push({
+          kind: "db",
+          title: "Read preview schema (tables)",
+          status: db.exitCode === 0 ? "ok" : "failed",
+          detail: db.exitCode === 0 ? "select executed" : db.output || "schema query failed",
+          evidence: db.exitCode === 0 ? db.output || undefined : undefined,
+        });
+      } catch (error) {
+        findings.push({
+          kind: "db",
+          title: "Read preview schema (tables)",
+          status: "failed",
+          detail: errorMessage(error),
+        });
+      }
+    } else {
+      findings.push({
+        kind: "db",
+        title: "Read preview schema (tables)",
+        status: "skipped",
+        detail: contract.database.required
+          ? "DATABASE_URL was not provided to the reviewer"
+          : "contract does not require a database",
+      });
+    }
+
+    try {
+      const logs = await runReviewCommand(
+        sandbox,
+        `tail -n 50 ${REVIEW_APP_LOG}`,
+        env,
+        cwd,
+        Math.min(5_000, remaining()),
+        budget.maxOutputChars,
+        options.signal,
+      );
+      findings.push({
+        kind: "log",
+        title: "App logs",
+        status: logs.exitCode === 0 ? "ok" : "failed",
+        evidence: logs.output || undefined,
+      });
+    } catch (error) {
+      findings.push({
+        kind: "log",
+        title: "App logs",
+        status: "failed",
+        detail: errorMessage(error),
+      });
+    }
+
+    return finish(findings.some((finding) => finding.status === "failed") ? "failed" : "ok");
+  } catch (error) {
+    findings.push({ kind: "app", title: "Reviewer", status: "failed", detail: errorMessage(error) });
+    return finish("failed", errorMessage(error));
+  } finally {
+    if (appPid) {
+      try {
+        await sandbox.runCommand({
+          cmd: "sh",
+          args: ["-c", `kill ${appPid} 2>/dev/null || true`],
+          cwd,
+          env,
+          timeoutMs: 2_000,
+        });
+      } catch {
+        // The sandbox is deleted immediately after; the VM kills the process.
+      }
+    }
+    appUrl = appUrl; // Kept in the artifact as the ephemeral preview URL.
+  }
+}
+
 /**
  * Run the contract in a Vercel Sandbox microVM.
  *
@@ -315,6 +620,9 @@ async function runVercelCommands(
   const ref = options.ref?.trim() || null;
   const vcpus = options.vercel?.vcpus;
 
+  const reviewEnabled = options.review?.enabled === true;
+  const reviewAppPort = reviewEnabled && contract?.app ? contract.app.port : undefined;
+
   const params: Record<string, unknown> = {
     source: ref
       ? { type: "git", url: remote.url, revision: ref }
@@ -326,6 +634,7 @@ async function runVercelCommands(
     persistent: false,
     snapshotExpiration: 0,
     tags: { aikya: "preview" },
+    ...(reviewAppPort ? { ports: [reviewAppPort] } : {}),
     ...(options.vercel?.region ? { region: options.vercel.region } : {}),
     ...(options.vercel?.name ? { name: options.vercel.name } : {}),
   };
@@ -437,6 +746,28 @@ async function runVercelCommands(
       }.`;
     } else if (cancelled) {
       result.error = "Sandbox run was cancelled.";
+    }
+
+    const budget = reviewBudget(options);
+    if (options.review?.enabled) {
+      const review = await runReviewer({
+        sandbox,
+        contract,
+        env,
+        cwd: remote.directory,
+        options,
+        dependencies,
+        stepsOk: result.error === null,
+      });
+      result.review = review;
+      if (review) {
+        log(
+          `[sandbox] reviewer ${review.status}` +
+            (review.appUrl ? ` at ${review.appUrl}` : ""),
+        );
+      }
+    } else if (budget) {
+      result.review = undefined;
     }
 
     result.ok = result.error === null;

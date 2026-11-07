@@ -5,6 +5,7 @@ import { parseRepo } from "../github/client.ts";
 import type { NeonContext } from "../neon/cli.ts";
 import {
   SANDBOX_STEPS,
+  type ReviewerOptions,
   type SandboxBackend,
   type SandboxStepName,
 } from "./sandbox.ts";
@@ -64,6 +65,8 @@ export interface SubjectRepoConfig {
   networkPolicy?: "allow-all" | "deny-all";
   /** Vercel sandbox TTL in milliseconds. */
   sandboxTimeoutMs?: number;
+  /** Advisory reviewer explorer. Opt-in; deterministic tests stay the gate. */
+  review?: ReviewerOptions;
 }
 
 export interface RepoRegistry {
@@ -141,6 +144,7 @@ const KNOWN_KEYS = new Set([
   "image",
   "networkPolicy",
   "sandboxTimeoutMs",
+  "review",
 ]);
 
 function parsePositiveInteger(
@@ -181,6 +185,62 @@ function parseNetworkPolicy(
   throw new Error(
     `${file}: repos[${repo}].networkPolicy must be "allow-all" or "deny-all".`,
   );
+}
+
+function parseReview(
+  value: unknown,
+  file: string,
+  repo: string,
+): ReviewerOptions | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "boolean") return { enabled: value };
+  if (!isObject(value)) {
+    throw new Error(`${file}: repos[${repo}].review must be an object or boolean.`);
+  }
+
+  const enabled = value.enabled;
+  if (enabled !== undefined && typeof enabled !== "boolean") {
+    throw new Error(`${file}: repos[${repo}].review.enabled must be a boolean.`);
+  }
+
+  let paths: string[] | undefined;
+  if (value.paths !== undefined && value.paths !== null) {
+    if (!Array.isArray(value.paths)) {
+      throw new Error(`${file}: repos[${repo}].review.paths must be an array of URL paths.`);
+    }
+    paths = [];
+    for (const entry of value.paths) {
+      if (typeof entry !== "string" || !entry.trim()) {
+        throw new Error(`${file}: repos[${repo}].review.paths entries must be non-empty strings.`);
+      }
+      const path = entry.startsWith("/") ? entry : `/${entry}`;
+      if (!paths.includes(path)) paths.push(path);
+    }
+    if (paths.length === 0) {
+      throw new Error(`${file}: repos[${repo}].review.paths must not be empty.`);
+    }
+  }
+
+  for (const key of Object.keys(value)) {
+    if (!["enabled", "paths", "timeoutMs", "maxOutputChars"].includes(key)) {
+      throw new Error(`${file}: repos[${repo}].review has unknown key "${key}".`);
+    }
+  }
+
+  return {
+    enabled: enabled ?? undefined,
+    paths,
+    timeoutMs: parsePositiveInteger(
+      value.timeoutMs,
+      `repos[${repo}].review.timeoutMs`,
+      file,
+    ),
+    maxOutputChars: parsePositiveInteger(
+      value.maxOutputChars,
+      `repos[${repo}].review.maxOutputChars`,
+      file,
+    ),
+  };
 }
 
 function parseSteps(value: unknown, file: string, repo: string): SandboxStepName[] | undefined {
@@ -302,6 +362,7 @@ function parseEntry(
       image: nonEmptyString(raw.image, "image", file) ?? undefined,
       networkPolicy,
       sandboxTimeoutMs,
+      review: parseReview(raw.review, file, normalized),
     },
     warnings,
   };

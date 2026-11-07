@@ -25,6 +25,9 @@ const networkPolicy = flagString(flags, "network-policy") as
   | undefined;
 const sandboxTimeoutFlag = flagString(flags, "sandbox-timeout");
 const keep = flagBool(flags, "keep");
+const reviewEnabled = flagBool(flags, "review");
+const reviewDisabled = flagBool(flags, "no-review");
+const reviewTimeoutFlag = flagString(flags, "review-timeout");
 const json = flagBool(flags, "json");
 
 function fail(error: unknown): never {
@@ -38,6 +41,10 @@ function fail(error: unknown): never {
 
 if (!["local", "vercel"].includes(backendFlag)) {
   fail(new Error('--backend must be "local" or "vercel".'));
+}
+
+if (reviewEnabled && reviewDisabled) {
+  fail(new Error("Cannot pass both --review and --no-review."));
 }
 
 let vercel: SandboxOptions["vercel"] | undefined;
@@ -133,6 +140,22 @@ if (envFlag) {
   env[envFlag.slice(0, equals)] = envFlag.slice(equals + 1);
 }
 
+let reviewTimeoutMs: number | undefined;
+if (reviewTimeoutFlag) {
+  try {
+    reviewTimeoutMs = /^\d+$/.test(reviewTimeoutFlag)
+      ? Number(reviewTimeoutFlag)
+      : parseDuration(reviewTimeoutFlag);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+const review: SandboxOptions["review"] =
+  reviewEnabled || reviewDisabled
+    ? { enabled: reviewEnabled, timeoutMs: reviewTimeoutMs }
+    : undefined;
+
 const result = await runSandbox({
   source,
   backend: backendFlag as SandboxOptions["backend"],
@@ -143,6 +166,7 @@ const result = await runSandbox({
   env,
   keepDir: keep,
   vercel,
+  review,
   log: json ? undefined : (line) => console.error(dim(line)),
 });
 
@@ -192,6 +216,23 @@ if (json) {
         const tail = step.output.split(/\r?\n/).slice(-15).join("\n    ");
         console.log(`    ${tail}`);
       }
+    }
+  }
+
+  if (result.review) {
+    console.log("");
+    console.log(bold("Advisory reviewer"));
+    console.log(
+      `status      ${result.review.status}${result.review.reason ? ` ${dim(`(${result.review.reason})`)}` : ""} ${dim(`in ${formatDuration(result.review.durationMs)}`)}`,
+    );
+    for (const finding of result.review.findings) {
+      const mark =
+        finding.status === "ok"
+          ? paint("green", "✔")
+          : finding.status === "failed"
+            ? paint("yellow", "!")
+            : dim("·");
+      console.log(`  ${mark} ${finding.title}${finding.detail ? dim(` — ${finding.detail}`) : ""}`);
     }
   }
 

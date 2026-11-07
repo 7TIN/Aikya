@@ -406,21 +406,41 @@ fixture above.
 temporary git fixture and the shared Neon project. Committing
 `.aikya/preview.yml` to `gh-lab` will let the same path run for its PRs.
 
-#### W3 — Reviewer agent
+#### W3 — Reviewer agent (first deterministic explorer complete)
 
 **Goal:** let an agent explore a working preview without giving it control.
 
 **Tasks**
 
-- [ ] Expose the sandbox's app URL, logs, scoped DB URL, and a command runner.
-- [ ] Give the agent no control-plane token and no staging/production URL.
-- [ ] Record findings as check annotations or a PR comment, marked advisory.
-- [ ] Cap runtime and token spend per PR.
-- [ ] Keep the deterministic tests as the merge gate; the agent never is.
+- [x] Expose the sandbox's app URL, logs, scoped DB URL, and a command runner.
+      First implementation is a deterministic explorer inside the Vercel
+      sandbox: it starts `app.command`, probes configured HTTP paths, runs one
+      read-only schema query, and captures capped app logs.
+- [x] Give the agent no control-plane token and no staging/production URL.
+      The reviewer receives only the same branch-scoped sandbox env as the
+      deterministic steps; Neon/GitHub management credentials are never passed.
+- [x] Record findings as check annotations or a PR comment, marked advisory.
+      Findings are persisted in `report.json` → `review` and rendered as an
+      explicitly advisory section in `comment.md` and the CLI output.
+- [x] Cap runtime and token spend per PR. The deterministic explorer has no
+      token spend; it is bounded by `review.timeoutMs`, per-request timeouts,
+      and output caps.
+- [x] Keep the deterministic tests as the merge gate; the agent never is.
+      A failed reviewer finding leaves the deterministic preview status unchanged.
 
 **Acceptance:** the agent can query the preview database and hit the app; it
 cannot create or delete branches; its findings appear on the PR but do not
 change the check conclusion.
+
+**Live verification:** `7TIN/gh-lab` PR #2 on the Vercel backend returned
+READY with reviewer `ok`: app responded on port 3000, `GET /` and
+`GET /health` returned HTTP 200, the read-only schema query listed
+`customers`, `orders`, `products`, and `order_items`, and app logs were
+captured. The deterministic schema diff still showed `customers.preview_note`.
+
+**Not yet done:** an LLM tool loop and branch-scoped read-only DB roles. The
+current explorer is intentionally deterministic and read-only; a future LLM
+reviewer should consume the same bounded tool surface, not gain new control.
 
 #### W4 — Retention, observability, quotas
 
@@ -491,7 +511,8 @@ comments keep working; the state file records `headSha` and the sandbox name.
 | 2026-11-05 | W1 | Local sandbox: temp checkout, ref checkout, scrubbed env, timeouts, output caps, cancellation, teardown, CLI, tests |
 | 2026-11-06 | W2 | Subject registry, isolated Neon context, subject preview runner, step logs in artifacts, live fixture verification; branch-scoped roles deferred |
 | 2026-11-06 | W1–W2 | Vercel Sandbox backend added behind `--backend vercel` and opt-in registry entries; unit-tested without live calls; local remains default |
-| 2026-11-06 | W3–W4 | W3 reviewer agent and W4 quotas/retention not started; Vercel backend live verification pending |
+| 2026-11-08 | W3 | Deterministic reviewer explorer in Vercel sandbox: app start, HTTP probes, read-only schema query, capped logs, advisory artifacts/comment; live-verified on gh-lab PR #2 |
+| 2026-11-08 | W4 | W4 quotas/retention not started; LLM reviewer loop and branch-scoped DB roles deferred |
 
 ---
 

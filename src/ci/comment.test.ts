@@ -85,6 +85,31 @@ describe("renderPreviewComment", () => {
     expect(comment).toContain("+ table coupons");
   });
 
+  test("renders advisory reviewer findings without changing the status", () => {
+    const comment = renderPreviewComment(
+      result({
+        review: {
+          ran: true,
+          status: "failed",
+          appUrl: "https://preview.example.test",
+          appPort: 3000,
+          findings: [
+            { kind: "http", title: "GET /health", status: "failed", detail: "HTTP 500", evidence: "boom" },
+            { kind: "db", title: "Read preview schema (tables)", status: "ok" },
+          ],
+          durationMs: 1000,
+          budget: { timeoutMs: 90_000, maxOutputChars: 5_000 },
+        },
+      }),
+    );
+
+    expect(comment).toContain("preview ready");
+    expect(comment).toContain("Advisory reviewer");
+    expect(comment).toContain("does not affect the check outcome");
+    expect(comment).toContain("GET /health");
+    expect(comment).toContain("HTTP 500");
+  });
+
   test("explains why a fork PR is skipped", () => {
     const comment = renderPreviewComment(
       result({

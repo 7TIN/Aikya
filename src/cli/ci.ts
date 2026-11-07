@@ -32,6 +32,8 @@ function usage(): never {
       "  --source <path|url>  Override the registry source (local fixture or PR clone)",
       "  --ref <sha|ref>      Checkout override for a subject preview",
       "  --backend <local|vercel>  Execution backend (registry default: local)",
+      "  --review             Run the advisory reviewer explorer (subject previews)",
+      "  --no-review          Skip the advisory reviewer explorer",
       "  --parent <branch>    Parent branch (default: NEON_PARENT_BRANCH or main)",
       "  --name <branch>      Branch name override (sanitized)",
       "  --expires-in <dur>   Branch lifetime, default 7d (30s/30m/24h/7d)",
@@ -70,6 +72,8 @@ const repoFlag = flagString(flags, "repo");
 const sourceFlag = flagString(flags, "source");
 const ref = flagString(flags, "ref");
 const backendFlag = flagString(flags, "backend") as SandboxBackend | undefined;
+const reviewEnabled = flagBool(flags, "review");
+const reviewDisabled = flagBool(flags, "no-review");
 
 if (backendFlag && backendFlag !== "local" && backendFlag !== "vercel") {
   console.error("");
@@ -78,7 +82,14 @@ if (backendFlag && backendFlag !== "local" && backendFlag !== "vercel") {
   process.exit(1);
 }
 
-if (!repoFlag && (sourceFlag || ref || backendFlag)) {
+if (reviewEnabled && reviewDisabled) {
+  console.error("");
+  console.error("Cannot pass both --review and --no-review.");
+  console.error("");
+  process.exit(1);
+}
+
+if (!repoFlag && (sourceFlag || ref || backendFlag || reviewEnabled || reviewDisabled)) {
   usage();
 }
 
@@ -105,6 +116,11 @@ if (repoFlag) {
             sandboxTimeoutMs: entry.sandboxTimeoutMs,
           }
         : undefined;
+    const review = reviewEnabled
+      ? { ...(entry.review ?? {}), enabled: true }
+      : reviewDisabled
+        ? { ...(entry.review ?? {}), enabled: false }
+        : entry.review;
 
     subject = {
       repo: entry.repo,
@@ -117,6 +133,7 @@ if (repoFlag) {
       stepTimeoutMs: entry.stepTimeoutMs,
       backend,
       vercel,
+      review,
     };
     subjectBranch = monitorBranchName(entry.repo, pr);
   } catch (error) {

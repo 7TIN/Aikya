@@ -91,6 +91,7 @@ function fakeFactory(options: {
 
       return {
         name: "aikya-test-sandbox",
+        domain: (port: number) => `https://preview-${port}.example.test`,
         async runCommand(command) {
           calls.commands.push({
             cmd: command.cmd,
@@ -323,5 +324,96 @@ describe("runVercelSandbox", () => {
     expect(result.error).toContain("could not be created: authentication failed");
     expect(result.backend).toBe("vercel");
     expect(result.dir).toBeNull();
+  });
+
+  test("reviewer probes the app HTTP endpoints and read-only schema query without changing ok", async () => {
+    const contract = tempContract({ test: "bun test" });
+    contract.app = { command: "bun run dev", port: 3000 };
+    const { factory, calls } = fakeFactory({
+      onCommand: (command) => {
+        if (command.args?.[1]?.includes("nohup")) {
+          return { exitCode: 0, stdout: "4242", stderr: "" };
+        }
+        if (command.args?.[1]?.includes("information_schema")) {
+          return { exitCode: 0, stdout: '[{"table_name":"customers"}]', stderr: "" };
+        }
+        if (command.args?.[1]?.includes("tail")) {
+          return { exitCode: 0, stdout: "server listening", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "ok", stderr: "" };
+      },
+    });
+
+    const result = await runVercelSandbox(
+      {
+        source: "https://github.com/example/repo.git",
+        backend: "vercel",
+        contract,
+        steps: ["test"],
+        env: { DATABASE_URL: "postgres://preview-branch" },
+        review: { enabled: true, paths: ["/", "/health"], timeoutMs: 10_000 },
+      },
+      {
+        createSandbox: factory,
+        reviewFetch: (async () =>
+          new Response(JSON.stringify({ status: "ok" }), { status: 200 })) as unknown as typeof fetch,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.review?.ran).toBe(true);
+    expect(result.review?.status).toBe("ok");
+    expect(result.review?.appPort).toBe(3000);
+    expect(result.review?.appUrl).toBe("https://preview-3000.example.test");
+    expect(result.review?.findings.some((f) => f.kind === "http" && f.title === "GET /health" && f.status === "ok")).toBe(true);
+    expect(result.review?.findings.some((f) => f.kind === "db" && f.status === "ok")).toBe(true);
+    expect(calls.params.ports).toEqual([3000]);
+  });
+
+  test("reviewer HTTP failures are advisory and never fail the deterministic run", async () => {
+    const contract = tempContract({ test: "bun test" });
+    contract.app = { command: "bun run dev", port: 3000 };
+    const { factory } = fakeFactory({});
+
+    const result = await runVercelSandbox(
+      {
+        source: "https://github.com/example/repo.git",
+        backend: "vercel",
+        contract,
+        steps: ["test"],
+        review: { enabled: true, paths: ["/"], timeoutMs: 5_000 },
+      },
+      {
+        createSandbox: factory,
+        reviewFetch: (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.review?.status).toBe("failed");
+    expect(result.review?.findings.some((f) => f.kind === "http" && f.status === "failed")).toBe(true);
+  });
+
+  test("reviewer is skipped when deterministic steps fail", async () => {
+    const contract = tempContract({ test: "exit 1" });
+    contract.app = { command: "bun run dev", port: 3000 };
+    const { factory } = fakeFactory({
+      onCommand: () => ({ exitCode: 1, stdout: "", stderr: "boom" }),
+    });
+
+    const result = await runVercelSandbox(
+      {
+        source: "https://github.com/example/repo.git",
+        backend: "vercel",
+        contract,
+        steps: ["test"],
+        review: { enabled: true },
+      },
+      { createSandbox: factory },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.review?.status).toBe("skipped");
+    expect(result.review?.reason).toContain("deterministic steps failed");
   });
 });

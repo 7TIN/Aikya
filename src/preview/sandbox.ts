@@ -39,6 +39,41 @@ export interface SandboxStepResult {
 
 export type SandboxBackend = "local" | "vercel";
 
+export interface ReviewerOptions {
+  /** Enable the deterministic reviewer explorer. Defaults to false. */
+  enabled?: boolean;
+  /** HTTP paths to probe on the preview app. Defaults to `/` and `/health`. */
+  paths?: string[];
+  /** Overall reviewer budget in milliseconds. Defaults to 90 seconds. */
+  timeoutMs?: number;
+  /** Maximum characters retained per HTTP body/log snippet. */
+  maxOutputChars?: number;
+}
+
+export type ReviewFindingKind = "http" | "db" | "log" | "app";
+
+export interface ReviewFinding {
+  kind: ReviewFindingKind;
+  title: string;
+  status: "ok" | "failed" | "skipped";
+  detail?: string;
+  /** Capped evidence snippet (never the DATABASE_URL). */
+  evidence?: string;
+}
+
+export interface ReviewerResult {
+  ran: boolean;
+  /** Advisory only: a failed review never changes the deterministic preview status. */
+  status: "ok" | "failed" | "skipped";
+  reason?: string;
+  /** Public app URL while the sandbox lives; null after teardown. */
+  appUrl: string | null;
+  appPort: number | null;
+  findings: ReviewFinding[];
+  durationMs: number;
+  budget: { timeoutMs: number; maxOutputChars: number };
+}
+
 export interface SandboxOptions {
   /** Local directory or git URL. */
   source: string;
@@ -65,6 +100,11 @@ export interface SandboxOptions {
   workRoot?: string;
   /** Cooperative cancellation; kills the running step's process tree. */
   signal?: AbortSignal;
+  /**
+   * Advisory reviewer explorer. Opt-in; only honored by the Vercel backend.
+   * The reviewer never changes the deterministic pass/fail status.
+   */
+  review?: ReviewerOptions;
   /**
    * Vercel backend settings. The source must be a public git URL, or a local
    * git repository whose origin is a public HTTPS URL. Local directories and
@@ -97,6 +137,7 @@ export interface SandboxResult {
   dir: string | null;
   contract: PreviewContract | null;
   steps: SandboxStepResult[];
+  review?: ReviewerResult;
   error: string | null;
   durationMs: number;
 }
@@ -506,6 +547,22 @@ export async function runSandbox(
     dir: null,
     contract,
     steps: [],
+    review: options.review?.enabled
+      ? {
+          ran: false,
+          status: "skipped",
+          reason: "reviewer requires the Vercel backend",
+          appUrl: null,
+          appPort: null,
+          findings: [],
+          durationMs: 0,
+          budget: {
+            timeoutMs: options.review.timeoutMs ?? 90_000,
+            maxOutputChars:
+              options.review.maxOutputChars ?? maxOutputChars,
+          },
+        }
+      : undefined,
     error: null,
     durationMs: 0,
   };

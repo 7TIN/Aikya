@@ -74,7 +74,7 @@ can keep working independently.
 | `bun run branch:demo` | Create branch → feature SQL → branch data → report |
 | `bun run branch:report --base-url U --branch-url U` | Compare any two databases |
 | `bun run ci:preview --pr <n> --event <event>` | Local PR preview: create/recreate → migrate → test → report |
-| `bun run ci:preview --repo <owner/name> --pr <n> [--ref <sha>] [--backend local\|vercel]` | Subject-owned preview: branch in the repo's Neon project and run its own contract |
+| `bun run ci:preview --repo <owner/name> --pr <n> [--ref <sha>] [--backend local\|vercel] [--review]` | Subject-owned preview: branch in the repo's Neon project and run its own contract |
 | `bun run ci:cleanup --pr <n>` | Delete a preview branch (closed event) |
 | `bun run ci:cleanup --repo <owner/name> --pr <n>` | Delete a watched repo's preview branch |
 | `bun run watch --repo <owner/name>` | One pass over an external repo's open PRs → branches |
@@ -512,8 +512,8 @@ What happens inside a run:
 
 ### Verified in the lab
 
-Because `gh-lab` has no database contract yet, W2 was verified with a
-gitignored local fixture in the shared lab project:
+Because the lab's `gh-lab` initially had no preview contract, W2 was first
+verified with a gitignored local fixture in the shared lab project:
 
 - the migration added `customers.preview_note` in the preview branch only;
 - the report showed `+ column preview_note` and `+1` row;
@@ -522,19 +522,51 @@ gitignored local fixture in the shared lab project:
 - `--event closed` deleted the created branches; only `main`, `qa`, and
   `staging` remain.
 
+`gh-lab` now declares `.aikya/preview.yml` (install/migrate/test) on the
+`feature/aikya-preview-manifest` branch. A live Vercel Sandbox run on that
+branch completed all deterministic steps and its report showed
+`customers.preview_note` added only on the preview branch.
+
 The runner also has a Vercel Sandbox backend, selected with
-`--backend vercel` or `"backend": "vercel"` in the registry. It was built and
-unit-tested without calling Vercel; local remains the default until you link a
-Vercel project and explicitly verify the remote path.
+`--backend vercel` or `"backend": "vercel"` in the registry. Local remains the
+fallback for repos that do not opt in; the backend refuses local directories,
+private/SSH sources, and credentials embedded in URLs.
 
-The committed registry is deliberately strict. The lab uses a gitignored
-`config/repos.local.json` with `"apiKeyEnv": null` (explicit CLI login) and the
-shared project id; a fresh clone without that file fails closed until a subject
-key is provided.
+The committed registry names `NEON_API_KEY` for `7TIN/gh-lab` so fresh clones
+fail closed until the subject key exists. The lab uses a gitignored
+`config/repos.local.json` with `"apiKeyEnv": null` (explicit CLI login), the
+shared project id, and the same Vercel + reviewer settings.
 
-To make `gh-lab` itself produce a meaningful preview, commit a
-`.aikya/preview.yml` with a migrate command (and a database), or add the
-corresponding scripts and a Drizzle config.
+## Advisory reviewer explorer (W3)
+
+The reviewer is a **deterministic, bounded explorer** inside the Vercel
+sandbox — not an LLM call. It runs only when a repo opts in:
+
+```json
+{
+  "review": {
+    "enabled": true,
+    "paths": ["/", "/health"],
+    "timeoutMs": 90000
+  }
+}
+```
+
+After the deterministic steps pass, it:
+
+1. Starts `app.command` in the sandbox and waits for it to answer on its port.
+2. Probes each configured HTTP path and records a capped body snippet.
+3. Runs one read-only `information_schema` table query using the branch-scoped
+   `DATABASE_URL`.
+4. Captures a capped tail of the app logs.
+
+Findings are written to `report.json` → `review` and rendered as an
+**advisory** section in `comment.md`. A failed probe never changes the
+deterministic READY/FAILED outcome and never gains branch-management or
+control-plane credentials.
+
+Local previews skip the reviewer with `reviewer requires the Vercel backend`,
+because starting the app on the host would break the sandbox boundary.
 
 ## Staging and QA environments (Phase 3)
 

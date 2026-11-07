@@ -8,7 +8,12 @@
       "apiKeyEnv": "NEON_API_KEY",
       "database": "neondb",
       "stepTimeoutMs": 600000,
-      "backend": "vercel"
+      "backend": "vercel",
+      "review": {
+        "enabled": true,
+        "paths": ["/", "/health"],
+        "timeoutMs": 90000
+      }
     }
   ]
 }

@@ -142,6 +142,26 @@ function statusDetails(result: PreviewResult): string[] {
 
   lines.push("");
 
+  if (result.review) {
+    const review = result.review;
+    lines.push(
+      "Advisory reviewer (does not affect the check outcome):",
+      "",
+      `- Status: \`${review.status}\`${review.appPort ? ` on port \`${review.appPort}\`` : ""}`,
+    );
+    if (review.reason) lines.push(`- Reason: ${mdCell(review.reason)}`);
+    for (const finding of review.findings) {
+      const mark =
+        finding.status === "ok" ? "✅" : finding.status === "failed" ? "⚠️" : "⏭️";
+      const detail = finding.detail ? ` — ${mdCell(finding.detail)}` : "";
+      lines.push(`- ${mark} ${mdCell(finding.title)}${detail}`);
+      if (finding.evidence) {
+        lines.push("  ```text", finding.evidence.slice(0, 2000), "  ```");
+      }
+    }
+    lines.push("");
+  }
+
   if (result.report) {
     lines.push(...schemaLines(result));
   }

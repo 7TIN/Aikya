@@ -176,6 +176,7 @@ export class WatchService {
       stepTimeoutMs: entry.stepTimeoutMs,
       backend: entry.backend,
       vercel,
+      review: entry.review,
     };
   }
 

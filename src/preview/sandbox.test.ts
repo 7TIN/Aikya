@@ -288,4 +288,19 @@ describe("runSandbox", () => {
     expect(result.steps).toHaveLength(0);
     expect(result.dir).toBeNull();
   });
+
+  test("reviewer is skipped on the local backend instead of running the app on the host", async () => {
+    const source = await fixture({ "package.json": "{}" });
+
+    const result = await runSandbox({
+      source,
+      contract: contract({ test: `bun -e "console.log('ok')"` }),
+      steps: ["test"],
+      review: { enabled: true },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.review?.status).toBe("skipped");
+    expect(result.review?.reason).toContain("Vercel backend");
+  });
 });

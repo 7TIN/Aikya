@@ -20,6 +20,8 @@ import { buildBranchReport, type BranchReport } from "../neon/report.ts";
 import {
   runSandbox,
   SANDBOX_STEPS,
+  type ReviewerOptions,
+  type ReviewerResult,
   type SandboxBackend,
   type SandboxOptions,
   type SandboxResult,
@@ -102,6 +104,8 @@ export interface SubjectPreviewConfig {
   backend?: SandboxBackend;
   /** Vercel settings when backend is `vercel`. */
   vercel?: SandboxOptions["vercel"];
+  /** Advisory reviewer explorer. Opt-in per repo. */
+  review?: ReviewerOptions;
 }
 
 /** Subject metadata recorded in the result so artifacts explain what ran. */
@@ -126,6 +130,8 @@ export interface PreviewResult {
   reason: string;
   steps: PreviewStep[];
   tests?: PreviewTests;
+  /** Advisory reviewer findings; never changes the deterministic status. */
+  review?: ReviewerResult;
   report?: BranchReport;
   comment: string;
   artifacts?: PreviewArtifacts;
@@ -426,6 +432,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
 
   let failed = false;
   let tests: PreviewTests | undefined;
+  let review: ReviewerResult | undefined;
   let processError: string | undefined;
 
   if (subject) {
@@ -450,10 +457,12 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
       stepTimeoutMs: subject.stepTimeoutMs,
       env,
       vercel: subject.vercel,
+      review: subject.review,
     });
 
     steps.push(...sandbox.steps.map(sandboxPreviewStep));
     tests = sandboxTests(sandbox);
+    review = sandbox.review;
     failed = !sandbox.ok;
     processError = sandbox.error ?? undefined;
   } else {
@@ -565,6 +574,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
     expiresAt,
     steps,
     tests,
+    review,
     report,
     comment: "",
     error: processError,
@@ -672,6 +682,30 @@ export function printPreviewResult(result: PreviewResult): void {
     console.log("");
     console.log(paint("red", "Test output (tail)"));
     console.log(dim(result.tests.outputTail));
+  }
+
+  if (result.review?.ran || result.review?.status === "skipped") {
+    const review = result.review;
+    console.log("");
+    console.log(bold("Advisory reviewer"));
+    const mark =
+      review.status === "ok"
+        ? paint("green", "✔")
+        : review.status === "failed"
+          ? paint("yellow", "!")
+          : dim("·");
+    console.log(
+      `${mark} ${review.status}${review.appPort ? dim(` :${review.appPort}`) : ""}${review.reason ? dim(` — ${review.reason}`) : ""}`,
+    );
+    for (const finding of review.findings) {
+      const findingMark =
+        finding.status === "ok"
+          ? paint("green", "✔")
+          : finding.status === "failed"
+            ? paint("yellow", "!")
+            : dim("·");
+      console.log(`  ${findingMark} ${finding.title}${finding.detail ? dim(` — ${finding.detail}`) : ""}`);
+    }
   }
 
   if (result.report) {
