@@ -664,6 +664,24 @@ export async function resolvePreviewContract(
     ...(detected?.warnings ?? []),
   ];
 
+  if (manifest) {
+    // Detection warns about missing scripts and an undeclared app port. When a
+    // manifest declares the command or port, those detection warnings are
+    // noise; keep only manifest-level warnings.
+    const filtered = warnings.filter((warning) => {
+      if (
+        warning === "No test script found; the test step will be skipped."
+      ) {
+        return manifest.manifest.commands.test == null;
+      }
+      if (warning.startsWith("App port was not declared;")) {
+        return manifest.manifest.app == null;
+      }
+      return true;
+    });
+    warnings.splice(0, warnings.length, ...filtered);
+  }
+
   if (!manifest) {
     warnings.unshift(
       "No .aikya/preview.yml; commands were inferred from repository files. Commit a manifest to make the preview reproducible.",
