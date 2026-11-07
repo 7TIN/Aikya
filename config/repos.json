@@ -7,7 +7,8 @@
       "parent": "main",
       "apiKeyEnv": "NEON_API_KEY",
       "database": "neondb",
-      "stepTimeoutMs": 600000
+      "stepTimeoutMs": 600000,
+      "backend": "vercel"
     }
   ]
 }
