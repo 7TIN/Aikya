@@ -4,6 +4,7 @@ import { getDatabase } from "./db/client.ts";
 import { collectDatabaseStats } from "./db/stats.ts";
 import { dashboardHtml } from "./dashboard.ts";
 import { createEventLog } from "./events/log.ts";
+import { buildCostView, costRatesFromEnv } from "./cost/view.ts";
 import {
   resolveWatchConfig,
   unconfiguredWatchStatus,
@@ -247,6 +248,20 @@ const server = Bun.serve({
         return json({ events });
       } catch (error) {
         return json({ events: [], error: errorMessage(error) }, 500);
+      }
+    },
+
+    "/api/cost": async () => {
+      try {
+        const [branches, events] = await Promise.all([
+          cachedBranches(),
+          createEventLog().load({ limit: 500 }),
+        ]);
+        const { rates, fromEnv } = costRatesFromEnv();
+        const view = buildCostView({ branches, events, rates, ratesFromEnv: fromEnv });
+        return json(view);
+      } catch (error) {
+        return json({ error: errorMessage(error) }, 500);
       }
     },
 

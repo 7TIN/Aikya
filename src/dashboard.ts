@@ -135,6 +135,15 @@ export const dashboardHtml = `<!doctype html>
     </table>
   </div>
 
+  <h2>Cost view <span id="cost-count" class="count"></span></h2>
+  <div class="panel">
+    <div style="padding: 14px; display: flex; gap: 18px; flex-wrap: wrap" id="cost-summary"></div>
+    <table>
+      <thead><tr><th>branch</th><th>logical size</th><th>est. billed storage</th><th>age</th><th>storage $</th><th>compute $</th><th>total $</th></tr></thead>
+      <tbody id="cost"></tbody>
+    </table>
+  </div>
+
   <h2>Branch report</h2>
   <div class="panel"><pre id="report">Select a branch and run a report to compare storage and schema against its parent.</pre></div>
 </main>
@@ -445,6 +454,56 @@ function renderEvents(events) {
     ));
   }
 }
+function renderCost(payload) {
+  const summary = $("cost-summary");
+  const table = $("cost");
+  table.replaceChildren();
+  summary.replaceChildren();
+
+  if (!payload || payload.error) {
+    $("cost-count").textContent = "";
+    const tr = row(cell(payload?.error || "Cost data unavailable.", "empty"));
+    tr.firstChild.colSpan = 7;
+    table.appendChild(tr);
+    return;
+  }
+
+  $("cost-count").textContent = "estimate";
+  const rates = payload.rates || {};
+  summary.append(
+    card("Estimated total", "$" + Number(payload.totalUsd || 0).toFixed(4), "storage + compute + sandbox"),
+    card("Storage", "$" + Number(payload.storageUsd || 0).toFixed(4), formatBytes(payload.branches.reduce((s, b) => s + b.estimatedStorageBytes, 0)) + " billed"),
+    card("Compute", "$" + Number(payload.computeUsd || 0).toFixed(4), payload.branches.reduce((s, b) => s + b.cpuUsedSec, 0) + " CPU-sec"),
+    card("Sandbox", "$" + Number(payload.sandboxUsd || 0).toFixed(4), (payload.sandboxSeconds || 0).toFixed(1) + " reviewer-sec"),
+  );
+
+  const hint = document.createElement("div");
+  hint.className = "sub";
+  hint.style.width = "100%";
+  hint.textContent = "Rates are estimates" + (payload.ratesFromEnv ? " (overridden via env)" : "") +
+    ": storage $" + rates.storagePerGbHourUsd + "/GB-hr · compute $" + rates.computePerCuHourUsd + "/CU-hr · sandbox $" + rates.sandboxPerHourUsd + "/hr";
+  summary.appendChild(hint);
+
+  const branches = payload.branches || [];
+  if (branches.length === 0) {
+    const tr = row(cell("No branches to cost.", "empty"));
+    tr.firstChild.colSpan = 7;
+    table.appendChild(tr);
+    return;
+  }
+
+  for (const branch of branches.sort((a, b) => b.totalUsd - a.totalUsd)) {
+    table.appendChild(row(
+      cell(branch.name),
+      cell(formatBytes(branch.logicalSizeBytes), "num"),
+      cell(formatBytes(branch.estimatedStorageBytes), "num"),
+      cell(branch.ageHours.toFixed(1) + "h", "num"),
+      cell("$" + branch.storageCostUsd.toFixed(6), "num"),
+      cell("$" + branch.computeCostUsd.toFixed(6), "num"),
+      cell("$" + branch.totalUsd.toFixed(6), "num"),
+    ));
+  }
+}
 function cell(text, className) {
   const td = document.createElement("td");
   td.textContent = text;
@@ -506,13 +565,14 @@ async function getJson(path) {
 }
 
 async function load() {
-  const [health, stats, branches, previews, watch, events] = await Promise.allSettled([
+  const [health, stats, branches, previews, watch, events, cost] = await Promise.allSettled([
     getJson("/api/health"),
     getJson("/api/stats"),
     getJson("/api/branches"),
     getJson("/api/previews"),
     getJson("/api/watch"),
     getJson("/api/events?limit=50"),
+    getJson("/api/cost"),
   ]);
 
   if (health.status === "fulfilled") {
@@ -656,6 +716,12 @@ async function load() {
     renderEvents(events.value.events || []);
   } else {
     renderEvents([]);
+  }
+
+  if (cost.status === "fulfilled") {
+    renderCost(cost.value);
+  } else {
+    renderCost({ error: cost.reason?.message });
   }
 }
 
