@@ -3,6 +3,7 @@ import { customers } from "./db/schema.ts";
 import { getDatabase } from "./db/client.ts";
 import { collectDatabaseStats } from "./db/stats.ts";
 import { dashboardHtml } from "./dashboard.ts";
+import { createEventLog } from "./events/log.ts";
 import {
   resolveWatchConfig,
   unconfiguredWatchStatus,
@@ -125,12 +126,21 @@ const server = Bun.serve({
     "/api/branches": {
       GET: async () => {
         try {
+          const events = await createEventLog().load({ limit: 200 });
+          const lastReportByBranch = new Map<string, string>();
+          for (const event of events) {
+            if (event.type === "branch.report" && event.branch && event.at) {
+              lastReportByBranch.set(event.branch, event.at);
+            }
+          }
+
           const branches = (await cachedBranches()).map((branch) => {
             const blocked = branchDeleteBlockedReason(branch);
             return {
               ...branch,
               deletable: blocked === null,
               deleteBlockedReason: blocked,
+              lastReportAt: lastReportByBranch.get(branch.name) ?? null,
             };
           });
           return json({ branches });
@@ -221,6 +231,23 @@ const server = Bun.serve({
         previews,
         ...(branchesError ? { branchesError } : {}),
       });
+    },
+
+    "/api/events": async (request) => {
+      try {
+        const url = new URL(request.url);
+        const limit = Math.min(
+          Math.max(Number(url.searchParams.get("limit") ?? 50), 1),
+          500,
+        );
+        const repo = url.searchParams.get("repo")?.trim() || undefined;
+        const branch = url.searchParams.get("branch")?.trim() || undefined;
+        const since = url.searchParams.get("since")?.trim() || undefined;
+        const events = await createEventLog().load({ limit, repo, branch, since });
+        return json({ events });
+      } catch (error) {
+        return json({ events: [], error: errorMessage(error) }, 500);
+      }
     },
 
     "/api/watch": () => json(watcher ? watcher.status() : unconfiguredWatchStatus()),

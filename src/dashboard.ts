@@ -119,11 +119,19 @@ export const dashboardHtml = `<!doctype html>
     </table>
   </div>
 
-  <h2>Branches</h2>
+  <h2>Branches <span id="branches-count" class="count"></span></h2>
   <div class="panel">
     <table>
-      <thead><tr><th>branch</th><th>state</th><th>logical size</th><th>Δ parent</th><th>Neon writes</th><th>created</th><th></th></tr></thead>
+      <thead><tr><th>branch</th><th>state</th><th>age</th><th>TTL</th><th>owner</th><th>last report</th><th>Δ parent</th><th>Neon writes</th><th>created</th><th></th></tr></thead>
       <tbody id="branches"></tbody>
+    </table>
+  </div>
+
+  <h2>Event log <span id="events-count" class="count"></span></h2>
+  <div class="panel">
+    <table>
+      <thead><tr><th>time</th><th>type</th><th>repo</th><th>branch</th><th>status</th><th>duration</th><th>detail</th></tr></thead>
+      <tbody id="events"></tbody>
     </table>
   </div>
 
@@ -383,6 +391,60 @@ function renderWatch(payload) {
     ));
   }
 }
+function formatAge(value) {
+  if (!value) return "n/a";
+  const ms = Date.now() - new Date(value).getTime();
+  if (Number.isNaN(ms)) return String(value);
+  if (ms < 60_000) return Math.max(0, Math.round(ms / 1000)) + "s";
+  if (ms < 3_600_000) return Math.round(ms / 60_000) + "m";
+  if (ms < 86_400_000) return (ms / 3_600_000).toFixed(1) + "h";
+  return (ms / 86_400_000).toFixed(1) + "d";
+}
+function formatTtl(expiresAt) {
+  if (!expiresAt) return "n/a";
+  const ms = new Date(expiresAt).getTime() - Date.now();
+  if (Number.isNaN(ms)) return String(expiresAt);
+  if (ms <= 0) return "expired";
+  if (ms < 3_600_000) return Math.round(ms / 60_000) + "m";
+  if (ms < 86_400_000) return (ms / 3_600_000).toFixed(1) + "h";
+  return (ms / 86_400_000).toFixed(1) + "d";
+}
+function branchOwner(branch) {
+  const match = /^preview\/([a-z0-9-]+)-pr-(\d+)$/.exec(branch);
+  return match ? match[1] : null;
+}
+function formatDuration(value) {
+  if (value === undefined || value === null) return "n/a";
+  if (value < 1_000) return value + "ms";
+  return (value / 1000).toFixed(1) + "s";
+}
+function renderEvents(events) {
+  const table = $("events");
+  table.replaceChildren();
+  $("events-count").textContent = events.length === 0 ? "" : events.length + " recent";
+
+  if (events.length === 0) {
+    const tr = row(cell("No events recorded yet. Events are appended to artifacts/events.jsonl.", "empty"));
+    tr.firstChild.colSpan = 7;
+    table.appendChild(tr);
+    return;
+  }
+
+  for (const event of events) {
+    const detail = event.detail ? JSON.stringify(event.detail) : event.reason || "";
+    const detailCell = cell(detail.length > 90 ? detail.slice(0, 87) + "…" : detail);
+    detailCell.title = detail;
+    table.appendChild(row(
+      cell(formatDate(event.at)),
+      cell(event.type),
+      cell(event.repo || "—"),
+      cell(event.branch || "—"),
+      cell(event.status || "—"),
+      cell(formatDuration(event.durationMs), "num"),
+      detailCell,
+    ));
+  }
+}
 function cell(text, className) {
   const td = document.createElement("td");
   td.textContent = text;
@@ -444,12 +506,13 @@ async function getJson(path) {
 }
 
 async function load() {
-  const [health, stats, branches, previews, watch] = await Promise.allSettled([
+  const [health, stats, branches, previews, watch, events] = await Promise.allSettled([
     getJson("/api/health"),
     getJson("/api/stats"),
     getJson("/api/branches"),
     getJson("/api/previews"),
     getJson("/api/watch"),
+    getJson("/api/events?limit=50"),
   ]);
 
   if (health.status === "fulfilled") {
@@ -556,7 +619,10 @@ async function load() {
       table.appendChild(row(
         name,
         state,
-        cell(branch.logicalSize > 0 ? formatBytes(branch.logicalSize) : "n/a", "num"),
+        cell(formatAge(branch.createdAt)),
+        cell(formatTtl(branch.expiresAt)),
+        cell(branchOwner(branch.name) || "—"),
+        cell(branch.lastReportAt ? formatDate(branch.lastReportAt) : "n/a"),
         cell(formatBytesDelta(delta), "num"),
         cell(formatBytes(branch.writtenDataBytes), "num"),
         cell(formatDate(branch.createdAt)),
@@ -584,6 +650,12 @@ async function load() {
     renderWatch(watch.value);
   } else {
     renderWatch({ configured: false, error: watch.reason.message });
+  }
+
+  if (events.status === "fulfilled") {
+    renderEvents(events.value.events || []);
+  } else {
+    renderEvents([]);
   }
 }
 

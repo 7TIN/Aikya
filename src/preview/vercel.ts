@@ -1,6 +1,7 @@
 import { rm, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { Sandbox } from "@vercel/sandbox";
+import { createEventLog } from "../events/log.ts";
 import { resolvePreviewContract, type PreviewContract } from "./contract.ts";
 import {
   prepareCheckout,
@@ -653,9 +654,17 @@ async function runVercelCommands(
     durationMs: 0,
   };
 
+  const events = createEventLog();
+
   try {
     sandbox = await createSandbox(params);
     log(`[sandbox] created ${sandbox.name}`);
+    await events.append({
+      type: "sandbox.created",
+      repo: options.source,
+      status: "created",
+      detail: { sandbox: sandbox.name, source: remote.url },
+    });
 
     const stepNames = [...(options.steps ?? SANDBOX_STEPS)];
     const env = defaultStepEnv(options);
@@ -785,9 +794,19 @@ async function runVercelCommands(
       try {
         await sandbox.delete({ deleteOrphanSnapshots: true });
         log(`[sandbox] deleted ${name}`);
+        await events.append({
+          type: "sandbox.deleted",
+          status: "deleted",
+          detail: { sandbox: name },
+        });
       } catch {
         // The sandbox auto-stops after its timeout; report the path locally.
         log(`[sandbox] could not delete ${name} (it will stop at its timeout)`);
+        await events.append({
+          type: "sandbox.deleted",
+          status: "failed",
+          detail: { sandbox: name, reason: "delete failed; will stop at timeout" },
+        });
       }
     }
   }

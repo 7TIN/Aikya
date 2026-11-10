@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createEventLog } from "../events/log.ts";
 import { sanitizeBranchName, type PreviewEvent } from "../ci/events.ts";
 import {
   runPreview,
@@ -357,11 +358,19 @@ export async function syncRepository(
   const preview = options.deps?.preview ?? runPreview;
   const artifactsDir =
     options.artifactsDir ?? ((name: string, pr: number) => artifactDirFor(name, pr));
+  const events = createEventLog();
 
   const repoState = (options.state.repos[repo] ??= {
     lastSyncAt: null,
     lastError: null,
     pullRequests: {},
+  });
+
+  await events.append({
+    type: "sync.started",
+    repo,
+    status: "started",
+    detail: { runTests, parent },
   });
 
   const summary: SyncSummary = {
@@ -599,5 +608,19 @@ export async function syncRepository(
   repoState.lastError = null;
   repoState.lastSyncAt = new Date().toISOString();
   summary.finishedAt = new Date().toISOString();
+  await events.append({
+    type: "sync.finished",
+    repo,
+    status: summary.error ? "failed" : "ok",
+    durationMs: Date.now() - Date.parse(summary.startedAt),
+    detail: {
+      fetched: summary.fetched,
+      created: summary.created,
+      recreated: summary.recreated,
+      deleted: summary.deleted,
+      unchanged: summary.unchanged,
+      failed: summary.failed,
+    },
+  });
   return summary;
 }

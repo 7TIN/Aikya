@@ -29,6 +29,7 @@ import {
   type SandboxStepResult,
 } from "../preview/sandbox.ts";
 import { renderPreviewComment } from "./comment.ts";
+import { createEventLog } from "../events/log.ts";
 import {
   parsePreviewEvent,
   parsePullRequestNumber,
@@ -265,6 +266,8 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
   const branch = previewBranchName(pr, options.name);
   const plan = planPreview(event, { fork: options.fork });
   const steps: PreviewStep[] = [];
+  const events = createEventLog();
+  const startedAt = Date.now();
 
   const subjectMetadata: PreviewSubject | undefined = subject
     ? {
@@ -352,6 +355,14 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
       const startedAt = Date.now();
       await deleteBranch(branch, subject?.neon);
       steps.push(step("delete branch", "ok", "removed", Date.now() - startedAt));
+      await events.append({
+        type: "branch.deleted",
+        repo: subject?.repo,
+        pr,
+        branch,
+        status: "deleted",
+        durationMs: Date.now() - startedAt,
+      });
       return finalize(
         {
           ...base,
@@ -410,6 +421,16 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
         Date.now() - startedAt,
       ),
     );
+    await events.append({
+      type: "branch.created",
+      repo: subject?.repo,
+      pr,
+      branch,
+      headSha: subject?.ref ?? undefined,
+      status: "created",
+      durationMs: Date.now() - startedAt,
+      detail: { parent, expiresAt },
+    });
 
     branchUrl = await branchConnectionString(branch, {
       pooled: false,
@@ -561,6 +582,19 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
         Date.now() - startedAt,
       ),
     );
+    await events.append({
+      type: "branch.report",
+      repo: subject?.repo,
+      pr,
+      branch,
+      status: "ok",
+      durationMs: Date.now() - startedAt,
+      detail: {
+        rowDelta: report.rowDelta,
+        sizeDeltaBytes: report.sizeDeltaBytes,
+        hasSchemaChanges: report.schemaDiff.hasChanges,
+      },
+    });
   } catch (error) {
     const message = errorMessage(error);
     steps.push(step("report", "failed", message));
@@ -579,6 +613,35 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
     comment: "",
     error: processError,
   };
+
+  if (review) {
+    await events.append({
+      type: "review.completed",
+      repo: subject?.repo,
+      pr,
+      branch,
+      status: review.status,
+      durationMs: review.durationMs,
+      detail: {
+        appPort: review.appPort,
+        findings: review.findings.map((finding) => ({
+          kind: finding.kind,
+          title: finding.title,
+          status: finding.status,
+        })),
+      },
+    });
+  }
+
+  await events.append({
+    type: "sync.finished",
+    repo: subject?.repo,
+    pr,
+    branch,
+    status: result.status,
+    durationMs: Date.now() - startedAt,
+    reason: result.error ?? undefined,
+  });
 
   return finalize(result, options.artifactsDir);
 }
