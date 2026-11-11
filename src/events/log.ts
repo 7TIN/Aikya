@@ -19,6 +19,7 @@ export const EVENT_TYPES = [
   "sandbox.deleted",
   "review.completed",
   "quota.exceeded",
+  "reap.completed",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];

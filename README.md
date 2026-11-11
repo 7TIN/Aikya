@@ -71,6 +71,7 @@ can keep working independently.
 | `bun run db:smoke --branch staging` | Verify tables, rows, migrations, and write rollback |
 | `bun run branch:verify-cow` | Create a no-write branch, assert 0 B delta, delete it |
 | `bun run branch:prune` | List/delete stale branches (dry run by default) |
+| `bun run branch:reap [--older-than 7d] [--repo <owner/name>] [--yes]` | TTL reaper: delete expired/stale `preview/` branches (dry run by default) and log the run |
 | `bun run branch:demo` | Create branch → feature SQL → branch data → report |
 | `bun run branch:report --base-url U --branch-url U` | Compare any two databases |
 | `bun run ci:preview --pr <n> --event <event>` | Local PR preview: create/recreate → migrate → test → report |
@@ -614,6 +615,34 @@ The dashboard **Quotas** panel shows the same numbers. The watcher additionally
 refuses to delete a branch whose name is not exactly the one it created for that
 PR, so a corrupted state file cannot target `main` or an environment branch.
 
+## Retention and the TTL reaper (W4)
+
+```bash
+bun run branch:reap                                  # dry run, preview/ branches older than 7d + expired
+bun run branch:reap --older-than 3d --json
+bun run branch:reap --repo 7TIN/gh-lab --yes         # delete in the subject project
+```
+
+The reaper uses the same guards as `branch:prune`: never `main`, the configured
+parent, a default/primary/Neon-protected branch, or `staging`/`qa`. It defaults
+to the `preview/` prefix, so ad-hoc branches are out of scope. Every run
+appends `reap.completed` to the event log; each deletion appends
+`branch.deleted` with `reason: reaper:<expired|age>`.
+
+The dashboard **Retention** panel has a **Dry-run prune** button. It calls
+`GET /api/branches/prune`, which lists exactly what would be deleted and always
+returns `deleted: []` — deletion is CLI-only, behind `--yes`.
+
+The **Branches** table adds retention warnings per branch:
+
+| Warning | Meaning |
+| --- | --- |
+| `expired` | `expiresAt` has passed |
+| `stale` | older than 7 days with no elapsed TTL |
+| `missing-owner` | repo-scoped preview with no tracked PR in the watcher state (only computed when the watcher is configured) |
+
+Warnings are informational; the reaper decides eligibility independently.
+
 ## Staging and QA environments (Phase 3)
 
 Two persistent branches mirror long-lived environments. They have no expiry and
@@ -669,7 +698,8 @@ so the branch comparison is always against its parent.
 | `GET /api/health` | DB connectivity, database name, latency |
 | `GET /api/stats` | Size + row counts per table |
 | `GET /api/customers?limit=20&offset=0` | Paginated customers |
-| `GET /api/branches` | Neon branches + logical size + writes |
+| `GET /api/branches` | Neon branches + logical size + writes + retention warnings |
+| `GET /api/branches/prune?older-than=7d&prefix=preview/` | Read-only prune preview: lists candidates, deletes nothing |
 | `DELETE /api/branches?name=<branch>` | Delete a non-protected branch (dashboard button) |
 | `GET /api/previews` | PR preview artifacts joined with live branches |
 | `GET /api/watch` | Watcher config, tracked PRs, last sync/error |
@@ -703,6 +733,8 @@ src/
     report.ts       Storage + schema report
     verify.ts       No-write COW verification
     prune.ts        Retention candidate selection
+    retention.ts    Expired/stale/missing-owner warnings
+    reaper.ts       TTL reaper (dry-run default) + run logging
     reset.ts        Pre-report → reset → migrate → smoke
     delete.ts       Protected-branch guard for dashboard deletion
   ci/

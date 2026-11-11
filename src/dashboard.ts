@@ -122,7 +122,7 @@ export const dashboardHtml = `<!doctype html>
   <h2>Branches <span id="branches-count" class="count"></span></h2>
   <div class="panel">
     <table>
-      <thead><tr><th>branch</th><th>state</th><th>age</th><th>TTL</th><th>owner</th><th>last report</th><th>Δ parent</th><th>Neon writes</th><th>created</th><th></th></tr></thead>
+      <thead><tr><th>branch</th><th>state</th><th>age</th><th>TTL</th><th>warnings</th><th>owner</th><th>last report</th><th>Δ parent</th><th>Neon writes</th><th>created</th><th></th></tr></thead>
       <tbody id="branches"></tbody>
     </table>
   </div>
@@ -149,6 +149,18 @@ export const dashboardHtml = `<!doctype html>
     <table>
       <thead><tr><th>repo</th><th>status</th><th>branches</th><th>sandbox today</th><th>storage delta</th><th>creates/hour</th><th>details</th></tr></thead>
       <tbody id="quotas"></tbody>
+    </table>
+  </div>
+
+  <h2>Retention <span id="retention-count" class="count"></span></h2>
+  <div class="panel">
+    <div style="padding: 12px 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap">
+      <button id="prune-preview">Dry-run prune</button>
+      <span id="retention-summary" class="sub">Lists preview branches the reaper would delete. This button never deletes; run <code>bun run branch:reap --yes</code> to apply.</span>
+    </div>
+    <table>
+      <thead><tr><th>branch</th><th>created</th><th>age</th><th>expires</th><th>reason</th></tr></thead>
+      <tbody id="prune"></tbody>
     </table>
   </div>
 
@@ -435,6 +447,79 @@ function formatDuration(value) {
   if (value < 1_000) return value + "ms";
   return (value / 1000).toFixed(1) + "s";
 }
+function formatAgeMs(ms) {
+  if (!Number.isFinite(ms)) return "n/a";
+  if (ms < 3_600_000) return Math.round(ms / 60_000) + "m";
+  if (ms < 86_400_000) return (ms / 3_600_000).toFixed(1) + "h";
+  return (ms / 86_400_000).toFixed(1) + "d";
+}
+function warningsCell(warnings) {
+  const td = document.createElement("td");
+  const list = warnings || [];
+  if (list.length === 0) {
+    td.textContent = "—";
+    return td;
+  }
+  for (const warning of list) {
+    const tag = document.createElement("span");
+    tag.className = "tag " + (warning.code === "expired" ? "failed" : "skipped");
+    tag.textContent = warning.code;
+    tag.title = warning.message;
+    td.append(tag, " ");
+  }
+  return td;
+}
+function renderRetention(payload) {
+  const table = $("prune");
+  table.replaceChildren();
+  $("retention-count").textContent = "";
+
+  if (!payload || payload.error) {
+    $("retention-summary").textContent = payload?.error || "Prune preview unavailable.";
+    const tr = row(cell(payload?.error || "Prune preview unavailable.", "empty error"));
+    tr.firstChild.colSpan = 5;
+    table.appendChild(tr);
+    return;
+  }
+
+  const candidates = payload.candidates || [];
+  $("retention-count").textContent = candidates.length === 0 ? "" : candidates.length + " candidates";
+  $("retention-summary").textContent = candidates.length === 0
+    ? "Dry run (" + payload.olderThan + "): nothing matches the retention policy. Nothing was deleted."
+    : "Dry run (" + payload.olderThan + "): " + candidates.length + " branch" +
+      (candidates.length === 1 ? "" : "es") + " would be deleted. Nothing was deleted.";
+
+  if (candidates.length === 0) {
+    const tr = row(cell("No branches match the retention policy.", "empty"));
+    tr.firstChild.colSpan = 5;
+    table.appendChild(tr);
+    return;
+  }
+
+  for (const candidate of candidates) {
+    table.appendChild(row(
+      cell(candidate.name),
+      cell(formatDate(candidate.createdAt)),
+      cell(formatAgeMs(candidate.ageMs), "num"),
+      cell(candidate.expiresAt ? formatDate(candidate.expiresAt) : "—"),
+      cell(candidate.reason),
+    ));
+  }
+}
+async function runPrunePreview() {
+  const button = $("prune-preview");
+  button.disabled = true;
+  $("retention-summary").textContent = "Computing prune preview…";
+  try {
+    renderRetention(await getJson(
+      "/api/branches/prune?prefix=" + encodeURIComponent("preview/") + "&older-than=7d",
+    ));
+  } catch (error) {
+    renderRetention({ error: error.message });
+  } finally {
+    button.disabled = false;
+  }
+}
 function renderEvents(events) {
   const table = $("events");
   table.replaceChildren();
@@ -688,7 +773,7 @@ async function load() {
   if (branches.status === "fulfilled") {
     if (branches.value.branches.length === 0) {
       const tr = row(cell("No branches visible.", "empty"));
-      tr.firstChild.colSpan = 7;
+      tr.firstChild.colSpan = 11;
       table.appendChild(tr);
     }
     const byId = new Map(branches.value.branches.map((branch) => [branch.id, branch]));
@@ -750,6 +835,7 @@ async function load() {
         state,
         cell(formatAge(branch.createdAt)),
         cell(formatTtl(branch.expiresAt)),
+        warningsCell(branch.warnings),
         cell(branchOwner(branch.name) || "—"),
         cell(branch.lastReportAt ? formatDate(branch.lastReportAt) : "n/a"),
         cell(formatBytesDelta(delta), "num"),
@@ -760,7 +846,7 @@ async function load() {
     }
   } else {
     const tr = row(cell(branches.reason.message, "empty error"));
-    tr.firstChild.colSpan = 7;
+    tr.firstChild.colSpan = 11;
     table.appendChild(tr);
   }
 
@@ -879,6 +965,8 @@ async function runReport(name, output, button) {
 }
 
 $("refresh").addEventListener("click", () => load());
+
+$("prune-preview").addEventListener("click", runPrunePreview);
 
 $("watch-sync").addEventListener("click", async () => {
   const button = $("watch-sync");

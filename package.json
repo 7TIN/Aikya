@@ -26,6 +26,7 @@
     "branch:reset": "bun run src/cli/branch.ts reset",
     "branch:verify-cow": "bun run src/cli/branch.ts verify-cow",
     "branch:prune": "bun run src/cli/branch.ts prune",
+    "branch:reap": "bun run src/cli/reap.ts",
     "db:smoke": "bun run src/cli/smoke.ts",
     "branch:demo": "bun run src/cli/demo.ts",
     "preview:contract": "bun run src/cli/contract.ts",

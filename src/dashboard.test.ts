@@ -32,5 +32,7 @@ describe("dashboard HTML", () => {
     expect(dashboardHtml).toContain("Cost view");
     expect(dashboardHtml).toContain("Quotas");
     expect(dashboardHtml).toContain('id="quotas"');
+    expect(dashboardHtml).toContain("Retention");
+    expect(dashboardHtml).toContain('id="prune-preview"');
   });
 });

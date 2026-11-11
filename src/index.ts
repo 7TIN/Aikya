@@ -6,6 +6,9 @@ import { dashboardHtml } from "./dashboard.ts";
 import { createEventLog } from "./events/log.ts";
 import { buildCostView, costRatesFromEnv } from "./cost/view.ts";
 import { collectQuotaStatuses } from "./preview/quota-status.ts";
+import { environmentNames } from "./env/environments.ts";
+import { parseDuration } from "./lib/duration.ts";
+import { parentBranchName } from "./neon/cli.ts";
 import {
   resolveWatchConfig,
   unconfiguredWatchStatus,
@@ -13,7 +16,13 @@ import {
 } from "./github/service.ts";
 import { deleteBranch, listBranches, type NeonBranch } from "./neon/branches.ts";
 import { branchDeleteBlockedReason } from "./neon/delete.ts";
+import { selectPrunable } from "./neon/prune.ts";
 import { buildBranchReport } from "./neon/report.ts";
+import {
+  branchWarnings,
+  STALE_AFTER_MS,
+  warningsByBranch,
+} from "./neon/retention.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const hostname = process.env.HOST ?? "0.0.0.0";
@@ -136,20 +145,37 @@ const server = Bun.serve({
             }
           }
 
-          const branches = (await cachedBranches()).map((branch) => {
+          const all = await cachedBranches();
+          const ownedBranches = watcher
+            ? new Set(
+                watcher
+                  .status()
+                  .pullRequests.map((pullRequest) => pullRequest.branch),
+              )
+            : undefined;
+          const warnings = branchWarnings(all, {
+            staleAfterMs: STALE_AFTER_MS,
+            ownedBranches,
+            protectedNames: environmentNames(),
+          });
+          const grouped = warningsByBranch(warnings);
+
+          const branches = all.map((branch) => {
             const blocked = branchDeleteBlockedReason(branch);
             return {
               ...branch,
               deletable: blocked === null,
               deleteBlockedReason: blocked,
               lastReportAt: lastReportByBranch.get(branch.name) ?? null,
+              warnings: grouped.get(branch.name) ?? [],
             };
           });
-          return json({ branches });
+          return json({ branches, warnings });
         } catch (error) {
           return json(
             {
               branches: [],
+              warnings: [],
               error: errorMessage(error),
               hint: "Set NEON_PROJECT_ID and make sure the Neon CLI is authenticated (or NEON_API_KEY is set).",
             },
@@ -292,6 +318,39 @@ const server = Bun.serve({
         const result = await watcher.syncNow("manual");
         return json(result, result.error ? 500 : 200);
       },
+    },
+
+    "/api/branches/prune": async (request) => {
+      try {
+        const url = new URL(request.url);
+        const prefix = url.searchParams.get("prefix")?.trim() || "preview/";
+        const olderThan = url.searchParams.get("older-than")?.trim() || "7d";
+        const olderThanMs = parseDuration(olderThan);
+
+        const candidates = selectPrunable(await cachedBranches(), {
+          olderThanMs,
+          prefix,
+          parentName: parentBranchName(),
+          protectedNames: environmentNames(),
+        });
+
+        return json({
+          dryRun: true,
+          prefix,
+          olderThan,
+          olderThanMs,
+          candidates: candidates.map((candidate) => ({
+            name: candidate.branch.name,
+            createdAt: candidate.branch.createdAt,
+            expiresAt: candidate.branch.expiresAt ?? null,
+            ageMs: candidate.ageMs,
+            reason: candidate.reason,
+          })),
+          deleted: [],
+        });
+      } catch (error) {
+        return json({ dryRun: true, candidates: [], deleted: [], error: errorMessage(error) }, 500);
+      }
     },
 
     "/api/branches/report": async (request) => {

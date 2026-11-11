@@ -158,13 +158,12 @@ this lab (now claimed). The wrapper in `src/neon/cli.ts` is the seam to replace 
 | 1 | Baseline DB, seed data, manual branch, storage + schema report | Complete; COW verified, retention command added |
 | 2 | PR previews and ephemeral CI branches, automatic cleanup | Local simulator, workflow, and local external-repo watcher built; real GitHub PR activation pending |
 | 3 | Staging/testing branches, refresh and promotion workflow | Small version complete: `staging`/`qa`, safe reset, smoke test |
-| 4 | Per-agent sandboxes with TTL, quotas, and guardrails | Partial: Vercel sandboxes, quotas, delete-ownership guard |
-| 5 | Metrics, cost visibility, retention jobs, dashboards | Partial: event log, cost view, inventory; reaper open |
+| 4 | Per-agent sandboxes with TTL, quotas, and guardrails | Partial: Vercel sandboxes, quotas, reaper, delete-ownership guard |
+| 5 | Metrics, cost visibility, retention jobs, dashboards | Partial: event log, cost view, inventory, retention warnings; scheduled reaper open |
 
 > **Active execution plan:** workstreams W0–W4 below. The numbered phases stay
-> as the product-level view; the workstreams are the build order. W0–W3 are
-> implemented; W4 is partly implemented (event log, inventory, cost view,
-> quotas) with the TTL reaper and prune preview still open.
+> as the product-level view; the workstreams are the build order. W0–W4 are
+> implemented; scheduling the reaper and multi-tenant projects remain.
 
 ---
 
@@ -455,15 +454,23 @@ reviewer should consume the same bounded tool surface, not gain new control.
 - [x] Extend the branch inventory with age, TTL, owner, last report, writes.
       `/api/branches` adds `lastReportAt`; the Branches table shows age, TTL,
       owner, and the last report time.
-- [ ] Add `branch:prune --dry-run` and a dashboard dry-run preview.
-      (`branch:prune` is dry-run by default, but the dashboard preview is open.)
-- [ ] Add a TTL reaper for sandboxes and expired preview branches.
+- [x] Add `branch:prune --dry-run` and a dashboard dry-run preview.
+      `branch:prune` is dry-run unless `--yes`; the dashboard **Retention**
+      panel calls `GET /api/branches/prune`, which never deletes.
+- [x] Add a TTL reaper for sandboxes and expired preview branches.
+      `bun run branch:reap` lists/deletes expired or stale `preview/` branches
+      with the same guards as prune; every run appends `reap.completed`, and
+      each deletion appends `branch.deleted` with a reaper reason. Vercel
+      sandboxes are already ephemeral and auto-deleted per run.
 - [x] Add per-repo quotas: max branches, max sandbox minutes/day, max storage
       delta, and max creations/hour. `src/preview/quota.ts` evaluates them
       before a branch is created or replaced; a refusal carries the limit in
       its message, appends `quota.exceeded`, and leaves the existing branch
       untouched. The watcher also refuses to delete a branch it does not own.
-- [ ] Add stale-branch and missing-owner warnings.
+- [x] Add stale-branch and missing-owner warnings.
+      `src/neon/retention.ts` flags expired branches, previews older than 7
+      days, and repo-scoped previews with no tracked owner; the Branches table
+      shows them and `/api/branches` returns the full warning list.
 - [x] Add a cost view: branch × logical size × age × compute × sandbox.
       `src/cost/view.ts` + `GET /api/cost`; every number is labelled an
       estimate and rates come from `AIKYA_COST_*` or defaults.
@@ -473,9 +480,8 @@ lists exactly what would be deleted and deletes nothing; a reaper run is logged;
 an over-quota request is refused with the limit in the message.
 
 **Implemented:** branch inventory (age/TTL/owner/last report), event log,
-per-repo quotas with a pre-delete check, delete-ownership guard, cost view.
-**Still open:** dashboard prune preview, TTL reaper, stale/missing-owner
-warnings.
+per-repo quotas with a pre-delete check, delete-ownership guard, cost view,
+dashboard prune preview, TTL reaper, and stale/missing-owner warnings.
 
 ---
 
@@ -530,7 +536,8 @@ comments keep working; the state file records `headSha` and the sandbox name.
 | 2026-11-06 | W1–W2 | Vercel Sandbox backend added behind `--backend vercel` and opt-in registry entries; unit-tested without live calls; local remains default |
 | 2026-11-08 | W3 | Deterministic reviewer explorer in Vercel sandbox: app start, HTTP probes, read-only schema query, capped logs, advisory artifacts/comment; live-verified on gh-lab PR #2 |
 | 2026-11-08 | W4 | W4 quotas/retention not started; LLM reviewer loop and branch-scoped DB roles deferred |
-| 2026-11-11 | W4 | Event log + inventory (`/api/events`, dashboard tables), cost view (`/api/cost`), per-repo quotas with pre-delete refusal, delete-ownership guard, `bun run quota`; TTL reaper, prune preview, and stale warnings still open |
+| 2026-11-11 | W4 | Event log + inventory (`/api/events`, dashboard tables), cost view (`/api/cost`), per-repo quotas with pre-delete refusal, delete-ownership guard, `bun run quota` |
+| 2026-11-12 | W4 | Dashboard prune dry-run (`/api/branches/prune`), `branch:reap` TTL reaper with `reap.completed` logging, expired/stale/missing-owner warnings; W4 complete |
 
 ---
 
