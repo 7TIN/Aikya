@@ -427,7 +427,7 @@ function formatTtl(expiresAt) {
   return (ms / 86_400_000).toFixed(1) + "d";
 }
 function branchOwner(branch) {
-  const match = /^preview\/([a-z0-9-]+)-pr-(\d+)$/.exec(branch);
+  const match = /^preview\\/([a-z0-9-]+)-pr-(\\d+)$/.exec(branch);
   return match ? match[1] : null;
 }
 function formatDuration(value) {
