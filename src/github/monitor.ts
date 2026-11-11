@@ -468,6 +468,7 @@ export async function syncRepository(
         parent,
         runTests,
         artifactsDir: artifactsDir(repo, pr.number),
+        eventLogPath: options.eventLogPath,
         subject: options.subject
           ? { ...options.subject, ref: pr.headSha }
           : undefined,
@@ -575,6 +576,7 @@ export async function syncRepository(
           parent,
           runTests: false,
           artifactsDir: artifactsDir(repo, previous.number),
+          eventLogPath: options.eventLogPath,
           subject: options.subject
             ? { ...options.subject, ref: previous.headSha }
             : undefined,
