@@ -163,6 +163,8 @@ export class EventLog {
 }
 
 export function defaultEventLogPath(): string {
+  const override = process.env.AIKYA_EVENT_LOG?.trim();
+  if (override) return override;
   return `${process.cwd().replace(/\\/g, "/").replace(/\/+$/, "")}/artifacts/events.jsonl`;
 }
 

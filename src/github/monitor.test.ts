@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { PreviewEvent } from "../ci/events.ts";
 import type {
   PreviewOptions,
@@ -18,6 +20,7 @@ import {
 } from "./monitor.ts";
 
 const NOW = Date.parse("2026-11-04T10:00:00Z");
+let nextEventLog = 0;
 
 function pullRequest(
   overrides: Partial<GithubPullRequest> = {},
@@ -202,6 +205,10 @@ interface Harness {
 function harness(): Harness {
   const state = emptyMonitorState();
   const calls: PreviewOptions[] = [];
+  const eventLogPath = join(
+    tmpdir(),
+    `aikya-monitor-events-${process.pid}-${nextEventLog++}.jsonl`,
+  );
 
   const sync: Harness["sync"] = (open, options = {}) =>
     syncRepository({
@@ -210,6 +217,7 @@ function harness(): Harness {
       runTests: false,
       subject: options.subject,
       artifactsDir: () => "/tmp/db-branch-test-artifacts",
+      eventLogPath,
       deps: {
         now: () => options.now ?? NOW,
         fetchPullRequests: async () => {
@@ -341,6 +349,24 @@ describe("syncRepository", () => {
     expect(
       test.state.repos["7TIN/gh-lab"]?.pullRequests["7"]?.status,
     ).toBe("deleted");
+  });
+
+  test("refuses to delete a branch this watcher does not own", async () => {
+    const test = harness();
+    await test.sync([pullRequest()]);
+
+    const tracked = test.state.repos["7TIN/gh-lab"]?.pullRequests["7"];
+    if (tracked) tracked.branch = "main";
+
+    const summary = await test.sync([]);
+
+    expect(summary.deleted).toBe(0);
+    expect(summary.failed).toBe(1);
+    expect(test.calls).toHaveLength(1);
+    expect(summary.pullRequests[0]?.error).toContain("refusing to delete");
+    expect(test.state.repos["7TIN/gh-lab"]?.pullRequests["7"]?.status).toBe(
+      "failed",
+    );
   });
 
   test("never deletes on a partial page", async () => {

@@ -144,6 +144,14 @@ export const dashboardHtml = `<!doctype html>
     </table>
   </div>
 
+  <h2>Quotas <span id="quota-count" class="count"></span></h2>
+  <div class="panel">
+    <table>
+      <thead><tr><th>repo</th><th>status</th><th>branches</th><th>sandbox today</th><th>storage delta</th><th>creates/hour</th><th>details</th></tr></thead>
+      <tbody id="quotas"></tbody>
+    </table>
+  </div>
+
   <h2>Branch report</h2>
   <div class="panel"><pre id="report">Select a branch and run a report to compare storage and schema against its parent.</pre></div>
 </main>
@@ -504,6 +512,66 @@ function renderCost(payload) {
     ));
   }
 }
+function renderQuotas(payload) {
+  const table = $("quotas");
+  table.replaceChildren();
+  $("quota-count").textContent = "";
+
+  if (!payload || payload.error) {
+    const tr = row(cell(payload?.error || "Quota data unavailable.", "empty"));
+    tr.firstChild.colSpan = 7;
+    table.appendChild(tr);
+    return;
+  }
+
+  const repos = payload.repos || [];
+  $("quota-count").textContent = repos.length === 0 ? "" : repos.length + " repos";
+
+  if (repos.length === 0) {
+    const tr = row(cell("No repositories registered in config/repos.json.", "empty"));
+    tr.firstChild.colSpan = 7;
+    table.appendChild(tr);
+    return;
+  }
+
+  for (const entry of repos) {
+    const decision = entry.decision;
+    const statusCell = document.createElement("td");
+
+    if (entry.error || !decision) {
+      const tag = document.createElement("span");
+      tag.className = "tag failed";
+      tag.textContent = "error";
+      statusCell.appendChild(tag);
+    } else {
+      const tag = document.createElement("span");
+      tag.className = "tag " + (decision.allowed ? "ready" : "failed");
+      tag.textContent = decision.allowed ? "within limits" : "over quota";
+      statusCell.appendChild(tag);
+    }
+
+    const usage = decision?.usage;
+    const limits = decision?.limits;
+    const detail = entry.error
+      ? entry.error
+      : decision && decision.violations.length > 0
+        ? decision.violations.map((violation) => violation.message).join(" · ")
+        : "ok";
+
+    const detailCell = cell(detail);
+    detailCell.title = detail;
+
+    table.appendChild(row(
+      cell(entry.repo),
+      statusCell,
+      cell(usage && limits ? usage.branches + " / " + limits.maxBranches : "n/a", "num"),
+      cell(usage && limits ? (usage.sandboxSeconds / 60).toFixed(1) + " / " + limits.maxSandboxMinutesPerDay + " min" : "n/a", "num"),
+      cell(usage && limits ? formatBytes(usage.storageDeltaBytes) + " / " + formatBytes(limits.maxStorageDeltaBytes) : "n/a", "num"),
+      cell(usage && limits ? usage.createsLastHour + " / " + limits.maxCreatesPerHour : "n/a", "num"),
+      detailCell,
+    ));
+  }
+}
 function cell(text, className) {
   const td = document.createElement("td");
   td.textContent = text;
@@ -565,7 +633,7 @@ async function getJson(path) {
 }
 
 async function load() {
-  const [health, stats, branches, previews, watch, events, cost] = await Promise.allSettled([
+  const [health, stats, branches, previews, watch, events, cost, quotas] = await Promise.allSettled([
     getJson("/api/health"),
     getJson("/api/stats"),
     getJson("/api/branches"),
@@ -573,6 +641,7 @@ async function load() {
     getJson("/api/watch"),
     getJson("/api/events?limit=50"),
     getJson("/api/cost"),
+    getJson("/api/quotas"),
   ]);
 
   if (health.status === "fulfilled") {
@@ -722,6 +791,12 @@ async function load() {
     renderCost(cost.value);
   } else {
     renderCost({ error: cost.reason?.message });
+  }
+
+  if (quotas.status === "fulfilled") {
+    renderQuotas(quotas.value);
+  } else {
+    renderQuotas({ error: quotas.reason?.message });
   }
 }
 

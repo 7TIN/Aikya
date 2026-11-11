@@ -81,6 +81,7 @@ can keep working independently.
 | `bun run watch:loop --repo <owner/name>` | Poll an external repo continuously (default 120s) |
 | `bun run preview:contract --path <repo>` | Resolve a repo's preview contract without executing it (`--json`) |
 | `bun run preview:sandbox --repo <repo>` | Check out a ref and run the contract in a throwaway sandbox (`--backend local\|vercel`, `--steps`, `--ref`, `--keep`, `--json`) |
+| `bun run quota [--repo <owner/name>]` | Read-only guardrail usage vs limits (`--json`) |
 
 `branch:demo` also accepts `--parent`, `--reuse`, `--cleanup`, and `--json`.
 
@@ -473,9 +474,9 @@ Rules:
 - `"apiKeyEnv": null` explicitly selects the local Neon CLI login (useful in
   the lab). The child process still has ambient `NEON_API_KEY` removed.
 - `source` may be a local path or a git URL; omitted means the GitHub repo.
-- `steps`, `envFrom`, `database`, `stepTimeoutMs`, and the Vercel settings
-  (`vcpus`, `region`, `image`, `networkPolicy`, `sandboxTimeoutMs`) are
-  optional and are ignored by the local backend.
+- `steps`, `envFrom`, `database`, `stepTimeoutMs`, `quota`, `review`, and the
+  Vercel settings (`vcpus`, `region`, `image`, `networkPolicy`,
+  `sandboxTimeoutMs`) are optional and are ignored by the local backend.
 - `backend` is `local` unless explicitly set to `vercel`. Vercel still refuses
   plain local directories, private/SSH sources, and credentials embedded in
   URLs.
@@ -568,6 +569,51 @@ control-plane credentials.
 Local previews skip the reviewer with `reviewer requires the Vercel backend`,
 because starting the app on the host would break the sandbox boundary.
 
+## Guardrails (W4)
+
+Every watched repository runs behind per-repo caps. A run that would exceed a
+cap is refused **before** the branch is touched, so the preview that is already
+live stays live.
+
+```json
+{
+  "quota": {
+    "maxBranches": 5,
+    "maxStorageDeltaBytes": 268435456,
+    "maxSandboxMinutesPerDay": 20,
+    "maxCreatesPerHour": 10
+  }
+}
+```
+
+| Limit | Counts | Source |
+| --- | --- | --- |
+| `maxBranches` | current `preview/<owner>-<repo>-pr-<n>` branches | Neon branch list |
+| `maxStorageDeltaBytes` | newest positive `branch.report` delta per live branch | event log |
+| `maxSandboxMinutesPerDay` | completed preview-run time, rolling 24h | event log (`sync.finished`) |
+| `maxCreatesPerHour` | `branch.created`, rolling 1h | event log |
+
+Precedence is registry `quota` → `AIKYA_QUOTA_*` environment → built-in
+defaults (10 branches, 512 MiB, 30 min, 20/hour). A refusal:
+
+- returns a failed preview whose error contains the limit and current usage;
+- appends a `quota.exceeded` event with the full usage snapshot;
+- does **not** delete or recreate the existing preview branch.
+
+```text
+Quota exceeded for 7TIN/gh-lab: 3 preview branches for 7TIN/gh-lab
+(limit 2 branches; used 3)
+```
+
+```bash
+bun run quota                      # usage vs limits for every registered repo
+bun run quota --repo 7TIN/gh-lab --json
+```
+
+The dashboard **Quotas** panel shows the same numbers. The watcher additionally
+refuses to delete a branch whose name is not exactly the one it created for that
+PR, so a corrupted state file cannot target `main` or an environment branch.
+
 ## Staging and QA environments (Phase 3)
 
 Two persistent branches mirror long-lived environments. They have no expiry and
@@ -628,6 +674,9 @@ so the branch comparison is always against its parent.
 | `GET /api/previews` | PR preview artifacts joined with live branches |
 | `GET /api/watch` | Watcher config, tracked PRs, last sync/error |
 | `POST /api/watch/sync` | Reconcile open PRs with preview branches now |
+| `GET /api/events?limit=&repo=&branch=&since=` | Recent branch/sandbox/review events |
+| `GET /api/cost` | Estimated storage, compute, and sandbox cost by branch |
+| `GET /api/quotas` | Per-repo guardrail usage against limits |
 | `GET /api/branches/report?name=<branch>` | Storage + schema report |
 | `POST /api/echo` | Echo request body |
 
@@ -662,6 +711,16 @@ src/
     previews.ts     Preview artifacts + live branch join for the dashboard
     comment.ts      Sticky PR comment renderer
     run.ts          Branch-scoped child commands + test parsing
+  events/
+    log.ts          Append-only JSONL event log + filters
+  cost/
+    view.ts         Estimated storage/compute/sandbox cost view
+  preview/
+    contract.ts     W0 contract resolution (manifest → detection → fail closed)
+    sandbox.ts      W1 local sandbox + shared sandbox types
+    vercel.ts       Vercel Sandbox backend + advisory reviewer
+    registry.ts     W2 per-repo registry and credential resolution
+    quota.ts        W4 per-repo quotas (limits, usage, refusal)
   github/
     client.ts       Read-only GitHub REST polling + pagination
     monitor.ts      PR state machine: create/recreate/delete/skip
@@ -670,6 +729,7 @@ src/
     environments.ts Persistent staging/qa allowlist
   lib/
     duration.ts     30s/30m/24h/7d parsing for TTLs
+    repo.ts         Repository → branch-segment naming
   cli/              Operator scripts (includes smoke.ts, watch.ts)
 .github/workflows/  PR preview + scheduled cleanup
 drizzle/            Baseline migrations

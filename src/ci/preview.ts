@@ -31,6 +31,12 @@ import {
 import { renderPreviewComment } from "./comment.ts";
 import { createEventLog } from "../events/log.ts";
 import {
+  evaluateQuota,
+  formatQuotaUsage,
+  type QuotaDecision,
+  type QuotaLimits,
+} from "../preview/quota.ts";
+import {
   parsePreviewEvent,
   parsePullRequestNumber,
   planPreview,
@@ -107,6 +113,8 @@ export interface SubjectPreviewConfig {
   vercel?: SandboxOptions["vercel"];
   /** Advisory reviewer explorer. Opt-in per repo. */
   review?: ReviewerOptions;
+  /** Per-repo guardrail caps, evaluated before a branch is created. */
+  quota?: Partial<QuotaLimits>;
 }
 
 /** Subject metadata recorded in the result so artifacts explain what ran. */
@@ -133,6 +141,8 @@ export interface PreviewResult {
   tests?: PreviewTests;
   /** Advisory reviewer findings; never changes the deterministic status. */
   review?: ReviewerResult;
+  /** Quota check made before this run; present for watched repos. */
+  quota?: QuotaDecision;
   report?: BranchReport;
   comment: string;
   artifacts?: PreviewArtifacts;
@@ -159,6 +169,8 @@ export interface PreviewOptions {
   artifactsDir?: string;
   /** Origin metadata when the preview is created by the repository watcher. */
   source?: PreviewSource;
+  /** Override the event-log path (tests). */
+  eventLogPath?: string;
   /** Run the watched repo's own contract instead of Aikya's migrations. */
   subject?: SubjectPreviewConfig;
   /** Injectable clock for tests. */
@@ -266,7 +278,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
   const branch = previewBranchName(pr, options.name);
   const plan = planPreview(event, { fork: options.fork });
   const steps: PreviewStep[] = [];
-  const events = createEventLog();
+  const events = createEventLog(options.eventLogPath);
   const startedAt = Date.now();
 
   const subjectMetadata: PreviewSubject | undefined = subject
@@ -384,6 +396,46 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
         options.artifactsDir,
       );
     }
+  }
+
+  // W4 guardrail: refuse before touching an existing branch. A refused sync
+  // leaves the current preview intact instead of destroying it.
+  let quota: QuotaDecision | undefined;
+  if (subject) {
+    const subjectEvents = await events.load({ repo: subject.repo, limit: 2_000 });
+    quota = evaluateQuota({
+      repo: subject.repo,
+      branches,
+      events: subjectEvents,
+      limits: subject.quota,
+      addBranch: !exists,
+      now: options.now,
+    });
+
+    if (!quota.allowed) {
+      const message = quota.message ?? `Quota exceeded for ${subject.repo}.`;
+      steps.push(step("quota", "failed", message));
+      await events.append({
+        type: "quota.exceeded",
+        repo: subject.repo,
+        pr,
+        branch,
+        status: "refused",
+        reason: message,
+        detail: { usage: quota.usage, limits: quota.limits },
+      });
+      return finalize(
+        {
+          ...base,
+          status: "failed",
+          quota,
+          error: message,
+        },
+        options.artifactsDir,
+      );
+    }
+
+    steps.push(step("quota", "ok", formatQuotaUsage(quota)));
   }
 
   const expiresIn = options.expiresIn ?? DEFAULT_EXPIRES_IN;
@@ -609,6 +661,7 @@ export async function runPreview(options: PreviewOptions): Promise<PreviewResult
     steps,
     tests,
     review,
+    quota,
     report,
     comment: "",
     error: processError,
@@ -719,6 +772,11 @@ export function printPreviewResult(result: PreviewResult): void {
   console.log(`Branch     ${bold(result.branch)} ${dim(`(parent ${result.parent})`)}`);
   if (result.expiresAt) console.log(`Expires    ${result.expiresAt}`);
   console.log(`Action     ${result.action} — ${result.reason}`);
+  if (result.quota) {
+    console.log(
+      `Quota      ${result.quota.allowed ? paint("green", "ok") : paint("red", "exceeded")} ${dim(formatQuotaUsage(result.quota))}`,
+    );
+  }
 
   if (result.steps.length > 0) {
     console.log("");

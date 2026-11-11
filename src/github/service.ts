@@ -26,6 +26,8 @@ export interface WatchConfig {
   runTests: boolean;
   retryMs?: number;
   statePath?: string;
+  /** Override the event-log path (tests / alternate installs). */
+  eventLogPath?: string;
   /** Override the committed preview registry (tests / alternate installs). */
   registryPath?: string;
   /** Override the gitignored local registry. */
@@ -103,6 +105,7 @@ export function resolveWatchConfig(
     runTests: env.GITHUB_WATCH_TESTS !== "false",
     retryMs: parseRetryMs(env.GITHUB_WATCH_RETRY_MS),
     statePath: env.GITHUB_WATCH_STATE || undefined,
+    ...(env.AIKYA_EVENT_LOG ? { eventLogPath: env.AIKYA_EVENT_LOG } : {}),
     registryPath: env.AIKYA_REPO_REGISTRY || undefined,
     localRegistryPath: env.AIKYA_LOCAL_REPO_REGISTRY || undefined,
   };
@@ -177,6 +180,7 @@ export class WatchService {
       backend: entry.backend,
       vercel,
       review: entry.review,
+      quota: entry.quota,
     };
   }
 
@@ -234,6 +238,7 @@ export class WatchService {
           runTests: this.config.runTests,
           subject,
           retryMs: this.config.retryMs,
+          eventLogPath: this.config.eventLogPath,
           log: (line) => console.log(`[watch] ${repo} ${line}`),
         });
         summaries.push(summary);

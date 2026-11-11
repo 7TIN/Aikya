@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createEventLog } from "../events/log.ts";
+import { repoSegment } from "../lib/repo.ts";
 import { sanitizeBranchName, type PreviewEvent } from "../ci/events.ts";
 import {
   runPreview,
@@ -122,6 +123,8 @@ export interface SyncRepositoryOptions {
   retryMs?: number;
   /** Override the artifact directory (tests). */
   artifactsDir?: (repo: string, pr: number) => string;
+  /** Override the event-log path (tests). */
+  eventLogPath?: string;
   deps?: SyncDependencies;
   log?: (line: string) => void;
 }
@@ -130,14 +133,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** `7TIN/gh-lab` → `7tin-gh-lab`, used to namespace branches and artifacts. */
-export function repoSegment(repo: string): string {
-  const segment = repo
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return segment || "repo";
-}
+/** `7TIN/gh-lab` → `7tin-gh-lab`; re-exported for existing callers. */
+export { repoSegment };
 
 /**
  * Branch names are scoped by repository because one Neon project is shared by
@@ -358,7 +355,7 @@ export async function syncRepository(
   const preview = options.deps?.preview ?? runPreview;
   const artifactsDir =
     options.artifactsDir ?? ((name: string, pr: number) => artifactDirFor(name, pr));
-  const events = createEventLog();
+  const events = createEventLog(options.eventLogPath);
 
   const repoState = (options.state.repos[repo] ??= {
     lastSyncAt: null,
@@ -544,6 +541,29 @@ export async function syncRepository(
     for (const [key, previous] of Object.entries(repoState.pullRequests)) {
       if (open.has(key)) continue;
       if (previous.status === "deleted" || previous.status === "absent") {
+        continue;
+      }
+
+      // Guardrail: only delete the branch this watcher created for this PR.
+      // A corrupted or hand-edited state file must never be able to point the
+      // closed-PR cleanup at another branch (for example `main`).
+      const expectedBranch = monitorBranchName(repo, previous.number);
+      if (previous.branch !== expectedBranch) {
+        const message =
+          `refusing to delete "${previous.branch}": this watcher owns ` +
+          `"${expectedBranch}". Fix artifacts/monitor/state.json.`;
+        previous.status = "failed";
+        previous.error = message;
+        summary.failed += 1;
+        summary.pullRequests.push({
+          number: previous.number,
+          action: "delete",
+          status: "failed",
+          branch: previous.branch,
+          headSha: previous.headSha,
+          error: message,
+        });
+        log(`#${previous.number} delete refused: ${message}`);
         continue;
       }
 

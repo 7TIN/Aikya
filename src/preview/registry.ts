@@ -3,6 +3,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseRepo } from "../github/client.ts";
 import type { NeonContext } from "../neon/cli.ts";
+import { parseQuota, type QuotaLimits } from "./quota.ts";
 import {
   SANDBOX_STEPS,
   type ReviewerOptions,
@@ -67,6 +68,8 @@ export interface SubjectRepoConfig {
   sandboxTimeoutMs?: number;
   /** Advisory reviewer explorer. Opt-in; deterministic tests stay the gate. */
   review?: ReviewerOptions;
+  /** Per-repo caps enforced before a branch is created or replaced. */
+  quota?: Partial<QuotaLimits>;
 }
 
 export interface RepoRegistry {
@@ -145,6 +148,7 @@ const KNOWN_KEYS = new Set([
   "networkPolicy",
   "sandboxTimeoutMs",
   "review",
+  "quota",
 ]);
 
 function parsePositiveInteger(
@@ -363,6 +367,7 @@ function parseEntry(
       networkPolicy,
       sandboxTimeoutMs,
       review: parseReview(raw.review, file, normalized),
+      quota: parseQuota(raw.quota, file, normalized),
     },
     warnings,
   };

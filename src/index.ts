@@ -5,6 +5,7 @@ import { collectDatabaseStats } from "./db/stats.ts";
 import { dashboardHtml } from "./dashboard.ts";
 import { createEventLog } from "./events/log.ts";
 import { buildCostView, costRatesFromEnv } from "./cost/view.ts";
+import { collectQuotaStatuses } from "./preview/quota-status.ts";
 import {
   resolveWatchConfig,
   unconfiguredWatchStatus,
@@ -262,6 +263,15 @@ const server = Bun.serve({
         return json(view);
       } catch (error) {
         return json({ error: errorMessage(error) }, 500);
+      }
+    },
+
+    "/api/quotas": async () => {
+      try {
+        const report = await collectQuotaStatuses();
+        return json(report);
+      } catch (error) {
+        return json({ repos: [], warnings: [], error: errorMessage(error) }, 500);
       }
     },
 

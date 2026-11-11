@@ -34,7 +34,8 @@
     "ci:preview": "bun run src/cli/ci.ts preview",
     "ci:cleanup": "bun run src/cli/ci.ts cleanup",
     "watch": "bun run src/cli/watch.ts",
-    "watch:loop": "bun run src/cli/watch.ts --loop"
+    "watch:loop": "bun run src/cli/watch.ts --loop",
+    "quota": "bun run src/cli/quota.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -46,6 +47,7 @@
   "dependencies": {
     "@vercel/sandbox": "^3.9.1",
     "drizzle-orm": "^0.45.4",
-    "postgres": "^4.0.0"
+    "postgres": "^4.0.0",
+    "vercel": "^65.12.1"
   }
 }

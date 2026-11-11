@@ -134,6 +134,7 @@ if (repoFlag) {
       backend,
       vercel,
       review,
+      quota: entry.quota,
     };
     subjectBranch = monitorBranchName(entry.repo, pr);
   } catch (error) {

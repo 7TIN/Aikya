@@ -13,6 +13,12 @@
         "enabled": true,
         "paths": ["/", "/health"],
         "timeoutMs": 90000
+      },
+      "quota": {
+        "maxBranches": 5,
+        "maxStorageDeltaBytes": 268435456,
+        "maxSandboxMinutesPerDay": 20,
+        "maxCreatesPerHour": 10
       }
     }
   ]

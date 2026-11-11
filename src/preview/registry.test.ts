@@ -314,6 +314,49 @@ describe("requireSubjectRepo", () => {
   });
 });
 
+describe("quota", () => {
+  test("parses per-repo limits", async () => {
+    const root = await tempDir();
+    const path = join(root, "repos.json");
+    await writeJson(path, [
+      entry({
+        quota: {
+          maxBranches: 3,
+          maxStorageDeltaBytes: 1_048_576,
+          maxSandboxMinutesPerDay: 5,
+          maxCreatesPerHour: 2,
+        },
+      }),
+    ]);
+
+    const registry = await loadRepoRegistry({
+      path,
+      localPath: join(root, "missing.local.json"),
+    });
+    expect(findSubjectRepo(registry, "7TIN/gh-lab")?.quota).toEqual({
+      maxBranches: 3,
+      maxStorageDeltaBytes: 1_048_576,
+      maxSandboxMinutesPerDay: 5,
+      maxCreatesPerHour: 2,
+    });
+  });
+
+  test("rejects unknown quota keys and non-positive limits", async () => {
+    const root = await tempDir();
+    const path = join(root, "repos.json");
+    await writeJson(path, [entry({ quota: { maxBranch: 3 } })]);
+
+    await expect(
+      loadRepoRegistry({ path, localPath: join(root, "missing.local.json") }),
+    ).rejects.toThrow(/quota has unknown key "maxBranch"/);
+
+    await writeJson(path, [entry({ quota: { maxBranches: 0 } })]);
+    await expect(
+      loadRepoRegistry({ path, localPath: join(root, "missing.local.json") }),
+    ).rejects.toThrow(/quota\.maxBranches must be a positive number/);
+  });
+});
+
 describe("readEnvFile", () => {
   test("parses dotenv values and ignores comments", async () => {
     const root = await tempDir();
