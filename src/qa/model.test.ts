@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { createOpenAiModel, QaModelError } from "./model.ts";
+import {
+  createOpenAiModel,
+  DEFAULT_QA_MODELS,
+  GEMINI_BASE_URL,
+  OPENAI_BASE_URL,
+  QaModelError,
+  resolveQaProvider,
+} from "./model.ts";
 import type { ToolDefinition } from "./model.ts";
 
 const tools: ToolDefinition[] = [
@@ -127,5 +134,138 @@ describe("createOpenAiModel", () => {
     await expect(
       client.complete({ messages: [{ role: "user", content: "hi" }], tools }),
     ).rejects.toThrow("non-JSON");
+  });
+});
+
+function withEnv<T>(values: Record<string, string | undefined>, run: () => T): T {
+  const saved = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    saved.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return run();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+describe("resolveQaProvider", () => {
+  test("defaults to OpenAI with no hints", () => {
+    expect(resolveQaProvider({})).toBe("openai");
+  });
+
+  test("honours an explicit provider", () => {
+    expect(resolveQaProvider({ AIKYA_QA_PROVIDER: "gemini" })).toBe("gemini");
+    expect(resolveQaProvider({ AIKYA_QA_PROVIDER: "OPENAI" })).toBe("openai");
+  });
+
+  test("detects Gemini from the base URL or key", () => {
+    expect(
+      resolveQaProvider({ AIKYA_QA_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai" }),
+    ).toBe("gemini");
+    expect(resolveQaProvider({ GEMINI_API_KEY: "g" })).toBe("gemini");
+    expect(resolveQaProvider({ GOOGLE_API_KEY: "g" })).toBe("gemini");
+  });
+
+  test("a generic AIKYA_QA_API_KEY does not imply Gemini", () => {
+    expect(resolveQaProvider({ AIKYA_QA_API_KEY: "k" })).toBe("openai");
+  });
+});
+
+describe("Gemini compatibility", () => {
+  test("uses the Gemini base URL and a free-tier default model", async () => {
+    const { fetchImpl, captured } = fakeFetch(
+      () =>
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
+          { status: 200 },
+        ),
+    );
+
+    await withEnv(
+      {
+        AIKYA_QA_MODEL: undefined,
+        AIKYA_QA_BASE_URL: undefined,
+        AIKYA_QA_API_KEY: undefined,
+      },
+      async () => {
+        const client = createOpenAiModel({
+          provider: "gemini",
+          apiKey: "gemini-key",
+          fetchImpl,
+        });
+        expect(client.provider).toBe("gemini");
+        expect(client.model).toBe(DEFAULT_QA_MODELS.gemini);
+        await client.complete({
+          messages: [{ role: "user", content: "hi" }],
+          tools,
+        });
+
+        expect(captured[0]?.url).toBe(`${GEMINI_BASE_URL}/chat/completions`);
+        expect(captured[0]?.body.model).toBe("gemini-3.8-flash");
+        expect(captured[0]?.body.tool_choice).toBe("auto");
+      },
+    );
+  });
+
+  test("reads GEMINI_API_KEY and reports a Gemini-specific missing key", async () => {
+    await withEnv(
+      {
+        AIKYA_QA_API_KEY: undefined,
+        GEMINI_API_KEY: undefined,
+        GOOGLE_API_KEY: undefined,
+        AIKYA_QA_MODEL: undefined,
+      },
+      () => {
+        expect(() => createOpenAiModel({ provider: "gemini" })).toThrow(
+          /Gemini API key/,
+        );
+      },
+    );
+
+    await withEnv(
+      {
+        AIKYA_QA_API_KEY: undefined,
+        GEMINI_API_KEY: "gemini-key",
+        GOOGLE_API_KEY: undefined,
+        AIKYA_QA_MODEL: undefined,
+      },
+      () => {
+        const client = createOpenAiModel({ provider: "gemini" });
+        expect(client.model).toBe(DEFAULT_QA_MODELS.gemini);
+      },
+    );
+  });
+
+  test("keeps the OpenAI base URL when the provider is OpenAI", async () => {
+    const { fetchImpl, captured } = fakeFetch(
+      () =>
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
+          { status: 200 },
+        ),
+    );
+
+    await withEnv(
+      { AIKYA_QA_BASE_URL: undefined, AIKYA_QA_MODEL: undefined },
+      async () => {
+        const client = createOpenAiModel({
+          provider: "openai",
+          apiKey: "k",
+          fetchImpl,
+        });
+        await client.complete({
+          messages: [{ role: "user", content: "hi" }],
+          tools,
+        });
+        expect(captured[0]?.url).toBe(`${OPENAI_BASE_URL}/chat/completions`);
+        expect(captured[0]?.body.model).toBe(DEFAULT_QA_MODELS.openai);
+      },
+    );
   });
 });

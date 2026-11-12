@@ -32,6 +32,8 @@ export interface ModelReply {
 
 export interface ModelClient {
   readonly model: string;
+  /** Provider used for this client, when known. */
+  readonly provider?: QaProvider;
   complete(input: {
     messages: ChatMessage[];
     tools: ToolDefinition[];
@@ -39,11 +41,50 @@ export interface ModelClient {
   }): Promise<ModelReply>;
 }
 
+export type QaProvider = "openai" | "gemini";
+
 export interface OpenAiModelOptions {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
+  provider?: QaProvider;
   fetchImpl?: typeof fetch;
+}
+
+export const GEMINI_BASE_URL =
+  "https://generativelanguage.googleapis.com/v1beta/openai";
+export const OPENAI_BASE_URL = "https://api.openai.com/v1";
+
+/** Free-tier friendly defaults. Override with AIKYA_QA_MODEL. */
+export const DEFAULT_QA_MODELS: Record<QaProvider, string> = {
+  gemini: "gemini-3.8-flash",
+  openai: "gpt-4.1-mini",
+};
+
+/**
+ * Pick a provider without guessing when both keys are present:
+ * explicit AIKYA_QA_PROVIDER wins, then a Gemini base URL, then a Gemini key,
+ * then OpenAI. `AIKYA_QA_API_KEY` alone does not imply a provider.
+ */
+export function resolveQaProvider(
+  env: Record<string, string | undefined> = process.env,
+): QaProvider {
+  const explicit = env.AIKYA_QA_PROVIDER?.trim().toLowerCase();
+  if (explicit === "gemini" || explicit === "openai") return explicit;
+
+  const base = env.AIKYA_QA_BASE_URL ?? "";
+  if (/googleapis\.com/i.test(base)) return "gemini";
+  if (env.GEMINI_API_KEY || env.GOOGLE_API_KEY) return "gemini";
+  return "openai";
+}
+
+function providerKey(
+  provider: QaProvider,
+  env: Record<string, string | undefined>,
+): string | undefined {
+  return provider === "gemini"
+    ? env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY
+    : env.OPENAI_API_KEY;
 }
 
 export class QaModelError extends Error {
@@ -91,25 +132,34 @@ function parseToolCalls(raw: unknown): ToolCall[] {
 }
 
 export function createOpenAiModel(options: OpenAiModelOptions = {}): ModelClient {
+  const provider = options.provider ?? resolveQaProvider();
   const apiKey =
-    options.apiKey ?? process.env.AIKYA_QA_API_KEY ?? process.env.OPENAI_API_KEY;
+    options.apiKey ??
+    process.env.AIKYA_QA_API_KEY ??
+    providerKey(provider, process.env);
   const baseUrl = (
     options.baseUrl ??
     process.env.AIKYA_QA_BASE_URL ??
-    "https://api.openai.com/v1"
+    (provider === "gemini" ? GEMINI_BASE_URL : OPENAI_BASE_URL)
   ).replace(/\/$/, "");
-  const model = options.model ?? process.env.AIKYA_QA_MODEL ?? "gpt-4.1-mini";
+  const model =
+    options.model ?? process.env.AIKYA_QA_MODEL ?? DEFAULT_QA_MODELS[provider];
   const fetchImpl = options.fetchImpl ?? fetch;
 
   if (!apiKey) {
     throw new QaModelError(
-      "No model API key. Set AIKYA_QA_API_KEY (or OPENAI_API_KEY), " +
-        "or run `bun run qa` without --agent for deterministic checks.",
+      provider === "gemini"
+        ? "No Gemini API key. Set GEMINI_API_KEY (free tier: " +
+          "https://aistudio.google.com/apikey) or AIKYA_QA_API_KEY, " +
+          "or run `bun run qa` without --agent for deterministic checks."
+        : "No model API key. Set OPENAI_API_KEY or AIKYA_QA_API_KEY, " +
+          "or run `bun run qa` without --agent for deterministic checks.",
     );
   }
 
   return {
     model,
+    provider,
     async complete(input) {
       const response = await fetchImpl(`${baseUrl}/chat/completions`, {
         method: "POST",

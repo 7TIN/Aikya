@@ -495,6 +495,12 @@ the keys to the preview sandbox.
 disposable checkout. The PR preview sandbox is never reused for QA. The model
 API key stays on the host and is never passed into the sandbox.
 
+**Model:** Gemini free tier by default (`GEMINI_API_KEY`, provider resolution in
+`src/qa/model.ts`). The default model is `gemini-3.8-flash`; `gemini-4-hydrogen`
+and `gemini-3.5-flash-lite` are documented alternatives. OpenAI and any
+OpenAI-compatible endpoint remain supported through `AIKYA_QA_PROVIDER` /
+`AIKYA_QA_BASE_URL` / `AIKYA_QA_API_KEY`.
+
 **Sandboxes**
 
 | Backend | What it is | Use |

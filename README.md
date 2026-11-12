@@ -660,8 +660,36 @@ HTTP probe; `--no-checks` skips everything so only the agent runs.
 bun run qa:agent                                  # local temp checkout
 bun run qa:agent --sandbox vercel                 # dedicated Vercel MicroVM
 bun run qa:agent --max-steps 6 --apply            # apply the patch, never commit
-bun run qa:agent --model gpt-4.1-mini --json
+bun run qa:agent --model gemini-3.5-flash-lite --json
 ```
+
+### Model provider
+
+The agent is Gemini-first and works on the **free tier**. Create a key at
+<https://aistudio.google.com/apikey> and add it to `.env.local`:
+
+```bash
+GEMINI_API_KEY=...
+# optional overrides
+AIKYA_QA_MODEL=gemini-3.8-flash
+AIKYA_QA_MAX_STEPS=12
+```
+
+Provider resolution: `AIKYA_QA_PROVIDER` wins (`gemini` | `openai`), then a
+Gemini base URL, then `GEMINI_API_KEY`/`GOOGLE_API_KEY`, then OpenAI. Any
+OpenAI-compatible endpoint still works with `AIKYA_QA_BASE_URL` +
+`AIKYA_QA_API_KEY`.
+
+| Setting | Default |
+| --- | --- |
+| Gemini base URL | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| Gemini model | `gemini-3.8-flash` (free tier) |
+| Other free-tier choices | `gemini-4-hydrogen`, `gemini-3.5-flash-lite` |
+| OpenAI model | `gpt-4.1-mini` |
+
+Free-tier quotas are limited, so the agent keeps runs small: 12 steps, 8
+minutes, and tail-capped tool output. If a model name is retired, set
+`AIKYA_QA_MODEL` to a current one; the API error includes the requested name.
 
 The model gets eight tools: `list_files`, `read_file`, `search`, `write_file`,
 `delete_file`, `run_command`, `git_diff`, and `done`. Everything runs through a

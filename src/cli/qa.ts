@@ -3,7 +3,7 @@ import { flagBool, flagString, parseArgs } from "../lib/args.ts";
 import { bold, dim, paint } from "../lib/format.ts";
 import { runQaChecks } from "../qa/checks.ts";
 import { runQaAgent } from "../qa/agent.ts";
-import { createOpenAiModel } from "../qa/model.ts";
+import { createOpenAiModel, DEFAULT_QA_MODELS, resolveQaProvider } from "../qa/model.ts";
 import {
   buildQaReport,
   logQaEvent,
@@ -30,7 +30,9 @@ const noSmoke = flagBool(flags, "no-smoke");
 const noInstall = flagBool(flags, "no-install");
 const sandboxKind = (flagString(flags, "sandbox") ?? "local") as "local" | "vercel";
 const modelName =
-  flagString(flags, "model") ?? process.env.AIKYA_QA_MODEL ?? "gpt-4.1-mini";
+  flagString(flags, "model") ??
+  process.env.AIKYA_QA_MODEL ??
+  DEFAULT_QA_MODELS[resolveQaProvider()];
 const maxSteps = clampInt(
   Number(flagString(flags, "max-steps") ?? process.env.AIKYA_QA_MAX_STEPS ?? 12),
   1,
@@ -204,7 +206,9 @@ try {
     });
   } else {
     const model = createOpenAiModel({ model: modelName });
-    log(`[qa] model ${model.model}, max ${maxSteps} steps`);
+    log(
+      `[qa] model ${model.model} (${model.provider ?? "custom"}), max ${maxSteps} steps`,
+    );
     const result = await runQaAgent({
       sandbox,
       model,
