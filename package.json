@@ -36,7 +36,9 @@
     "ci:cleanup": "bun run src/cli/ci.ts cleanup",
     "watch": "bun run src/cli/watch.ts",
     "watch:loop": "bun run src/cli/watch.ts --loop",
-    "quota": "bun run src/cli/quota.ts"
+    "quota": "bun run src/cli/quota.ts",
+    "qa": "bun run src/cli/qa.ts",
+    "qa:agent": "bun run src/cli/qa.ts --agent"
   },
   "devDependencies": {
     "@types/bun": "latest",

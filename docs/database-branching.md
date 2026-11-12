@@ -158,12 +158,12 @@ this lab (now claimed). The wrapper in `src/neon/cli.ts` is the seam to replace 
 | 1 | Baseline DB, seed data, manual branch, storage + schema report | Complete; COW verified, retention command added |
 | 2 | PR previews and ephemeral CI branches, automatic cleanup | Local simulator, workflow, and local external-repo watcher built; real GitHub PR activation pending |
 | 3 | Staging/testing branches, refresh and promotion workflow | Small version complete: `staging`/`qa`, safe reset, smoke test |
-| 4 | Per-agent sandboxes with TTL, quotas, and guardrails | Partial: Vercel sandboxes, quotas, reaper, delete-ownership guard |
-| 5 | Metrics, cost visibility, retention jobs, dashboards | Partial: event log, cost view, inventory, retention warnings; scheduled reaper open |
+| 4 | Per-agent sandboxes with TTL, quotas, and guardrails | Partial: Vercel sandboxes, quotas, reaper, delete-ownership guard, QA agent |
+| 5 | Metrics, cost visibility, retention jobs, dashboards | Partial: event log, cost view, inventory, retention warnings, QA reports; scheduled jobs open |
 
-> **Active execution plan:** workstreams W0–W4 below. The numbered phases stay
-> as the product-level view; the workstreams are the build order. W0–W4 are
-> implemented; scheduling the reaper and multi-tenant projects remain.
+> **Active execution plan:** workstreams W0–W5 below. The numbered phases stay
+> as the product-level view; the workstreams are the build order. W0–W5 are
+> implemented; scheduling the QA agent and multi-tenant projects remain.
 
 ---
 
@@ -485,6 +485,55 @@ dashboard prune preview, TTL reaper, and stale/missing-owner warnings.
 
 ---
 
+#### W5 — QA agent (test and fix Aikya itself)
+
+**Goal:** one command that reproduces the manual loop — run the checks, read the
+failure, patch the cause, prove the fix — without giving a general coding agent
+the keys to the preview sandbox.
+
+**Decision:** the agent loop runs on the host; tools execute in a **separate**
+disposable checkout. The PR preview sandbox is never reused for QA. The model
+API key stays on the host and is never passed into the sandbox.
+
+**Sandboxes**
+
+| Backend | What it is | Use |
+| --- | --- | --- |
+| `local` (default) | Temp copy of the working tree with a baseline git commit | Fast, works with unpushed changes; not a security boundary |
+| `vercel` | Dedicated Vercel MicroVM created from the working tree, deleted after the run | Opt-in isolation; needs `vercel link` + `vercel env pull` |
+
+**Tools (eight):** `list_files`, `read_file`, `search`, `write_file`,
+`delete_file`, `run_command`, `git_diff`, `done`.
+
+**Caps and guards**
+
+- 12 steps and 8 minutes per run; 200 KB total write budget; 300 s per command.
+- Paths stay inside the checkout; `.env*`, `.git`, `node_modules`, `dist`, and
+  `artifacts` are unreadable.
+- Commands are allowlisted (`bun install|test|run|check`, `git status|diff|log|…`,
+  read-only search). Git mutations, dependency changes, network tools, cloud
+  CLIs, and shell redirection are rejected.
+- The agent never commits, pushes, tags, or deploys. Output is a patch in
+  `artifacts/qa/`; `--apply` runs `git apply --check` first.
+
+**Tasks**
+
+- [x] `bun run qa` — deterministic preflight in a disposable checkout.
+- [x] HTTP smoke check: boot the server on an ephemeral port and probe the
+      dashboard and JSON APIs that do not need Neon.
+- [x] `bun run qa:agent` — bounded loop over the eight tools.
+- [x] Local and Vercel QA sandbox backends.
+- [x] `qa.completed` event with status, checks, steps, files, and patch path.
+- [x] JSON/patch artifacts under `artifacts/qa/`.
+- [ ] Dashboard QA panel (the event log already shows `qa.completed`).
+- [ ] Scheduled `qa:agent` run on a branch or cron.
+
+**Acceptance:** `bun run qa` passes in a temp checkout; `qa:agent` can find a
+seeded failure, patch it, and leave an applicable diff without touching the host
+tree unless `--apply` is explicit.
+
+---
+
 ### Branch, sandbox, and artifact naming
 
 | Object | Name | Notes |
@@ -538,6 +587,7 @@ comments keep working; the state file records `headSha` and the sandbox name.
 | 2026-11-08 | W4 | W4 quotas/retention not started; LLM reviewer loop and branch-scoped DB roles deferred |
 | 2026-11-11 | W4 | Event log + inventory (`/api/events`, dashboard tables), cost view (`/api/cost`), per-repo quotas with pre-delete refusal, delete-ownership guard, `bun run quota` |
 | 2026-11-12 | W4 | Dashboard prune dry-run (`/api/branches/prune`), `branch:reap` TTL reaper with `reap.completed` logging, expired/stale/missing-owner warnings; W4 complete |
+| 2026-11-12 | W5 | QA preflight + bounded test-and-fix agent (`bun run qa`, `bun run qa:agent`), local/Vercel QA sandboxes, eight guarded tools, `qa.completed` event, patch-only output, HTTP smoke probe |
 
 ---
 

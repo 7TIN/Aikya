@@ -83,6 +83,8 @@ can keep working independently.
 | `bun run preview:contract --path <repo>` | Resolve a repo's preview contract without executing it (`--json`) |
 | `bun run preview:sandbox --repo <repo>` | Check out a ref and run the contract in a throwaway sandbox (`--backend local\|vercel`, `--steps`, `--ref`, `--keep`, `--json`) |
 | `bun run quota [--repo <owner/name>]` | Read-only guardrail usage vs limits (`--json`) |
+| `bun run qa` | Deterministic QA preflight in a disposable checkout (`--json`, `--no-install`) |
+| `bun run qa:agent` | Preflight + bounded test-and-fix agent (`--sandbox local\|vercel`, `--apply`, `--keep`, `--max-steps`, `--model`) |
 
 `branch:demo` also accepts `--parent`, `--reuse`, `--cleanup`, and `--json`.
 
@@ -643,6 +645,51 @@ The **Branches** table adds retention warnings per branch:
 
 Warnings are informational; the reaper decides eligibility independently.
 
+## QA agent (W5)
+
+`bun run qa` proves the build the way a human does it, but in a disposable copy:
+copy the working tree → `bun install` → `bun run typecheck` → `bun test` →
+`bun run build` → boot the server on an ephemeral port and probe `/`,
+`/api/watch`, `/api/events`, `/api/health`, and `POST /api/echo`. It writes a
+JSON report and appends `qa.completed` to the event log. `--no-smoke` skips the
+HTTP probe; `--no-checks` skips everything so only the agent runs.
+
+`bun run qa:agent` adds a **small** fix loop on top:
+
+```bash
+bun run qa:agent                                  # local temp checkout
+bun run qa:agent --sandbox vercel                 # dedicated Vercel MicroVM
+bun run qa:agent --max-steps 6 --apply            # apply the patch, never commit
+bun run qa:agent --model gpt-4.1-mini --json
+```
+
+The model gets eight tools: `list_files`, `read_file`, `search`, `write_file`,
+`delete_file`, `run_command`, `git_diff`, and `done`. Everything runs through a
+guard: no paths outside the checkout, no dotenv files, no git mutations, no
+dependency changes, no network commands, no cloud/GitHub CLIs, and a 200 KB
+write budget. The loop stops after 12 steps or 8 minutes, whichever comes first.
+
+The agent never runs inside the PR preview sandbox. QA uses its own checkout
+(local temp copy or a separate Vercel Sandbox) with a scrubbed environment; the
+model API key stays on the host. The result is a patch under `artifacts/qa/` —
+`--apply` applies it to the working tree after `git apply --check`, but QA never
+commits, pushes, or deploys.
+
+```text
+Aikya QA
+Run         qa-20261112T155000Z-edvy
+Sandbox     local
+Preflight
+  ✔ typecheck    7.4s
+  ✔ test         16.4s
+  ✔ build        0.6s
+  ✔ smoke        0.4s
+✔ OK
+```
+
+If no model key is configured, `qa:agent` fails with a clear message; plain
+`bun run qa` needs no key.
+
 ## Staging and QA environments (Phase 3)
 
 Two persistent branches mirror long-lived environments. They have no expiry and
@@ -753,6 +800,15 @@ src/
     vercel.ts       Vercel Sandbox backend + advisory reviewer
     registry.ts     W2 per-repo registry and credential resolution
     quota.ts        W4 per-repo quotas (limits, usage, refusal)
+  qa/
+    agent.ts        W5 bounded test-and-fix loop
+    checks.ts       Deterministic preflight (typecheck/test/build)
+    smoke.ts        Boots the server and probes the HTTP surface
+    tools.ts        Agent tool schemas + guarded dispatch
+    sandbox.ts      Disposable local checkout
+    vercel.ts       Dedicated Vercel QA Sandbox
+    guard.ts        Path/command allowlists
+    report.ts       JSON + patch artifacts, qa.completed event
   github/
     client.ts       Read-only GitHub REST polling + pagination
     monitor.ts      PR state machine: create/recreate/delete/skip
